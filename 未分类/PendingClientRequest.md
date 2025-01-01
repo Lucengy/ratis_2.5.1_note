@@ -15,13 +15,38 @@ PendingRequest只有两个字段需要知道一下
     }
 
     public abstract RaftClientRequest newRequestImpl();
+
+    CompletableFuture<RaftClientReply> getReplyFuture() {
+      return replyFuture;
+    }
 ```
 
-replyFuture是在类构造时就构造好了已经，最终调用replyFuture.complete()方法赋值即可
+replyFuture是在类构造时就已经构造好了，最终调用replyFuture.complete()方法赋值即可
 
 attempCount是在构造器中执行自增操作的，这是在retry request时进行的
 
 newRequestImpl是一个抽象方法，由子类实现，难度在ordered，那么我们关注其PendingOrderedRequest
+
+## PendingUnorderedRequest
+
+属于UnorderedRequest的内部类，整体的代码比较简洁明了，索性就将其全部代码搬运过来
+
+```java
+  class PendingUnorderedRequest extends PendingClientRequest {
+    private final Supplier<RaftClientRequest> requestConstructor;
+
+    PendingUnorderedRequest(Supplier<RaftClientRequest> requestConstructor) {
+      this.requestConstructor = requestConstructor;
+    }
+
+    @Override
+    public RaftClientRequest newRequestImpl() {
+      return requestConstructor.get();
+    }
+  }
+```
+
+问题的核心在caller构造PendingUnorderedRequest时传入的Supplier\<RaftClientRequest>函数式接口的实参，这部分参照客户端下的UnOrderedAsync类的分析
 
 ## PendingOrderedRequest
 

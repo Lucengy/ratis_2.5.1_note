@@ -113,7 +113,23 @@ service AdminProtocolService {
   }
 ```
 
-RPC中的StreamObserver有两个，一个是你提供给RPC方法的，即这里的responseHandler，用来作为输入流的回调函数；一个是RPC方法的返回值，作为输出流的回调函数。这里对于输入流输出流的处理逻辑，均由调用方提供，需要注意的是，unordered()是给blocking  IO使用的，但是这里使用的依旧是async，即异步的方法，所以blocking IO的概念是由上层调用方提供的。这里需要先看一下内部类部分，再向下看接下来的两个方法
+RPC中的StreamObserver有两个，一个是你提供给RPC方法的，即这里的responseHandler，用来作为输入流的回调函数；一个是RPC方法的返回值，作为输出流的回调函数。这里对于输入流输出流的处理逻辑，均由调用方提供，需要注意的是，unordered()是给blocking  IO使用的，但是这里使用的依旧是async，即异步的方法，所以blocking IO的概念是由上层调用方提供的。这里需要先看一下内部类部分，再向下看接下来的两个方法。
+
+看完内部类部分，我们将目光转向getOrderedStreamObservers()和getUnorderedAsyncStreamObservers()方法
+
+```java
+  AsyncStreamObservers getOrderedStreamObservers() {
+    return orderedStreamObservers.updateAndGet(
+        a -> a != null? a : new AsyncStreamObservers(this::ordered));
+  }
+
+  AsyncStreamObservers getUnorderedAsyncStreamObservers() {
+    return unorderedStreamObservers.updateAndGet(
+        a -> a != null? a : new AsyncStreamObservers(asyncStub::unordered));
+  }
+```
+
+看完了内部类，从GrpcClientRpc类中回来，接下来看getOrderedStreamObservers()方法和getUnorderedAsyncStreamObservers()方法的异同了。二者实际上没有什么不同，都是使用Bidirectional 类型的RPC，不同点在于是两个不同的RPC，一个是ordered RPC，一个是unordered RPC而已，说白了，就是服务端的处理逻辑不同，在客户端这一侧的逻辑可以认为是一样的。
 
 ## 4. 内部类
 
@@ -126,7 +142,7 @@ RPC中的StreamObserver有两个，一个是你提供给RPC方法的，即这里
            = new AtomicReference<>(new ConcurrentHashMap<>());
    ```
 
-   主要是两个方法，一个是putNew()，一个是getAndSetNull()。需要琢磨的地方是，getAndSetNull()方法，针对的不是requestID，而是整个map，这里的map是一个atomicReference类型，同时从getAndSetNull()的返回值是一个Map类型这两个点去体会该方法返回值是一个map，同时将AtomicReference置为null
+   主要是两个方法，一个是putNew()，一个是getAndSetNull()。需要琢磨的地方是，getAndSetNull()方法，针对的不是requestID，而是整个map，这里的map是一个AtomicReference类型，同时从getAndSetNull()的返回值是一个Map类型这两个点去体会该方法返回值是一个map，同时将AtomicReference置为null
 
    ```java
        synchronized CompletableFuture<RaftClientReply> putNew(long callId) {
@@ -174,7 +190,7 @@ RPC中的StreamObserver有两个，一个是你提供给RPC方法的，即这里
 
 3. AsyncStreamObservers
 
-   AsyncStreamObservers对象是统一的接口，里面封装了一个RequestStreamer对象，即输出流的处理逻辑；封装了一个StreamObserver\<RaftClientReplyProto>对象，即输出流的处理逻辑；同时封装了一个replyMap，即所有request的对应的CompletableFuture\<RaftClientReply>，用来检测request请求是否已经完成。
+   AsyncStreamObservers对象是统一的接口，里面封装了一个RequestStreamer对象，即输出流的处理逻辑；封装了一个StreamObserver\<RaftClientReplyProto>对象，即输入流的处理逻辑；同时封装了一个replyMap，即所有request的对应的CompletableFuture\<RaftClientReply>，用来检测request请求是否已经完成。
 
    关于RequestStreamer对象和replyMap对象不再赘述，关注点在持有一个StreamObserver\<RaftClientReplyProto>对象，根据泛型类型，加之我们处在client侧，可以判断此StreamObserver为输入流的处理逻辑
 
@@ -244,8 +260,47 @@ RPC中的StreamObserver有两个，一个是你提供给RPC方法的，即这里
    }
    ```
 
-   首先关注其构造函数
+   首先关注其构造函数，用来构造RequestStreamer对象，即输出流的处理逻辑
 
+   ```java
+       AsyncStreamObservers(Function<StreamObserver<RaftClientReplyProto>, StreamObserver<RaftClientRequestProto>> f) {
+         this.requestStreamer = new RequestStreamer(f.apply(replyStreamObserver));
+       }
+   ```
+
+   剩下的就是封装了onNext()方法，提供统一的入口函数
+
+   ```java
+       CompletableFuture<RaftClientReply> onNext(RaftClientRequest request) {
+         final long callId = request.getCallId();
+         final CompletableFuture<RaftClientReply> f = replies.putNew(callId);
+         if (f == null) {
+           return JavaUtils.completeExceptionally(new AlreadyClosedException(getName() + " is closed."));
+         }
+         try {
+           if (!requestStreamer.onNext(ClientProtoUtils.toRaftClientRequestProto(request))) {
+             return JavaUtils.completeExceptionally(new AlreadyClosedException(getName() + ": the stream is closed."));
+           }
+         } catch(Exception t) {
+           handleReplyFuture(request.getCallId(), future -> future.completeExceptionally(t));
+           return f;
+         }
+   
+         if (RaftClientRequestProto.TypeCase.WATCH.equals(request.getType().getTypeCase())) {
+           scheduler.onTimeout(watchRequestTimeoutDuration, () ->
+                   timeoutCheck(callId, watchRequestTimeoutDuration), LOG,
+               () -> "Timeout check failed for client request #" + callId);
+         } else {
+           scheduler.onTimeout(requestTimeoutDuration,
+               () -> timeoutCheck(callId, requestTimeoutDuration), LOG,
+               () -> "Timeout check failed for client request #" + callId);
+         }
+         return f;
+       }
+   ```
+
+   
+   
    
 
 
