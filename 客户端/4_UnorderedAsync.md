@@ -12,9 +12,9 @@
 * UnorderedAsynsc
 * BlockingImpl
 
-为了一探究竟，先从最简单的UnorderedAsync类开始探索。再次强调，这里的unordered是指在发送request时，不需要对其进行排序，也就是需要SlidingWindow的参与，所以相对于ordered，整体要简单很多
+为了一探究竟，先从最简单的UnorderedAsync类开始探索。再次强调，这里的unordered是指在发送request时，不需要对其进行排序，也就是不需要SlidingWindow的参与，所以相对于ordered，整体要简单很多
 
-## 2. 内部类PendingClientRequest
+## 2. 内部类PendingUnorderedRequest
 
 见PendingClientRequest.md
 
@@ -25,9 +25,9 @@
 * send()
 * sendRequestWithRetry()
 
-首先，来看send()方法中的前部分，CallId.getAndIncrement()是一个static method，用来自增生成clientId。构造PendingUnorderedRequest对象，该对象的构造器主要看其实参Supplier\<RaftClientRequest>，这里是通过client.newRaftClientRequest()方法构造新的RaftClientRequest对象。接下来，将目光转到sendReqeustWithRetry()方法。
+首先，来看send()方法中的前部分，CallId.getAndIncrement()是一个static method，用来自增生成clientId。构造PendingUnorderedRequest对象，该对象的构造器主要看其实参Supplier\<RaftClientRequest>，这里是通过client.newRaftClientRequest()方法构造新的RaftClientRequest对象。接下来，将目光转到sendReqeustWithRetry()方法，sendReqeustWithRetry()实际上是调用了GrpcClientRPc.snedRequestAsyncUnordered(RaftClientRequest)方法，并添加了处理异常和重试的逻辑，并设置了PendingUnordered中的CompletableFuture的状态。回到send()方法，在调用sendRequestWithRetry()方法后，剩下的也是对RPC的结果进行判断和异常处理。
 
-
+这里需要注意的是，在UnOrderedAsync的整个RPC过程中，都没有调用CompletableFuture.get()方法对RPC的过程进行阻塞，而其调用的GrpcClientRpc.sendRequestAsyncUnordered(RaftClientRequest)方法是异步的RPC，所以整个过程均为异步的过程。这也是类名所代表的，无序但异步
 
 ```java
   	static CompletableFuture<RaftClientReply> send(RaftClientRequest.Type type, Message message, RaftPeerId server,
@@ -107,4 +107,20 @@ static void sendRequestWithRetry(PendingClientRequest pending, RaftClientImpl cl
     });
   }
 ```
+
+## 4. OrderedAsync
+
+相对于UnorderedAsync类，这个类的处理逻辑会相对复杂
+
+### a. 内部类 PendingOrderedRequest
+
+见PendingClientRequest.md
+
+### b. field
+
+封装了一个RaftClient对象；一个map，该map作为SlidingWindow.Client对象的缓存，其中key为raft server的地址，value为SlidingWindow.Client对象；一个信号量对象，用来限制正在进行RPC的请求数量，默认为100
+
+* RaftClientImpl client
+* Map<String, SlidingWindow.Client<PendingOrderedRequest, RaftClientReply>> slidingWindows
+* Semaphore requestSemaphore
 
