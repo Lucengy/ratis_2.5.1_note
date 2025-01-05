@@ -17,3 +17,32 @@ public interface RaftClientProtocol {
 }
 ```
 
+## 华丽的分割线
+
+这接口名定的，乱七八糟啊
+
+```java
+public interface RaftServerProtocol {
+  enum Op {REQUEST_VOTE, APPEND_ENTRIES, INSTALL_SNAPSHOT}
+
+  RequestVoteReplyProto requestVote(RequestVoteRequestProto request) throws IOException;
+
+  AppendEntriesReplyProto appendEntries(AppendEntriesRequestProto request) throws IOException;
+
+  InstallSnapshotReplyProto installSnapshot(InstallSnapshotRequestProto request) throws IOException;
+
+  StartLeaderElectionReplyProto startLeaderElection(StartLeaderElectionRequestProto request) throws IOException;
+}
+```
+
+```java
+public interface RaftServerAsynchronousProtocol {
+
+  CompletableFuture<AppendEntriesReplyProto> appendEntriesAsync(AppendEntriesRequestProto request)
+      throws IOException;
+
+  CompletableFuture<ReadIndexReplyProto> readIndexAsync(ReadIndexRequestProto request)
+      throws IOException;
+}
+```
+
