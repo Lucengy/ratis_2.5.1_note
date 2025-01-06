@@ -89,3 +89,182 @@ public boolean hasEnoughSpace() {
 
 * getMetadata() 返回RaftStorageMetadata对象
 * persit(RaftStorageMetadata newMetadata) 将RaftStorageMetadata对象持久化存储，就是将term和votedFor写入到raft-meta文件中
+
+## 5. RaftStorageMetadataFileImpl
+
+相对简单的一个类
+
+* String TERM_KEY = "term"
+* String VOTED_FOR_KEY = "votedFor"
+* File file
+* AtomicReference\<RaftStorageMetadata> metadata
+
+构造器只是对file进行了赋值
+
+```java
+  RaftStorageMetadataFileImpl(File file) {
+    this.file = file;
+  }
+```
+
+接口方法
+
+```java
+  @Override
+  public RaftStorageMetadata getMetadata() throws IOException {
+    return ConcurrentUtils.updateAndGet(metadata, value -> value != null? value: load(file));
+  }
+
+  @Override
+  public void persist(RaftStorageMetadata newMetadata) throws IOException {
+    ConcurrentUtils.updateAndGet(metadata,
+        old -> Objects.equals(old, newMetadata)? old: atomicWrite(newMetadata, file));
+  }
+```
+
+这里实际傻瓜对应的是load和store，在getMetadata中，如果metadata已经有值，直接返回，否则调用load(File)从文件中加载；在persist(RaftStorageMetadata)中，如果需要persist的对象为metadata中缓存的对象，直接返回，否则调用atomicWrite(RaftStorageMetadata, File)方法store到磁盘上
+
+```java
+  static RaftStorageMetadata load(File file) throws IOException {
+    if (!file.exists()) {
+      return RaftStorageMetadata.getDefault();
+    }
+    try(BufferedReader br = new BufferedReader(new InputStreamReader(
+        new FileInputStream(file), StandardCharsets.UTF_8))) {
+      Properties properties = new Properties();
+      properties.load(br);
+      return RaftStorageMetadata.valueOf(getTerm(properties), getVotedFor(properties));
+    } catch (IOException e) {
+      throw new IOException("Failed to load " + file, e);
+    }
+  }
+
+  static RaftStorageMetadata atomicWrite(RaftStorageMetadata metadata, File file) throws IOException {
+    final Properties properties = new Properties();
+    properties.setProperty(TERM_KEY, Long.toString(metadata.getTerm()));
+    properties.setProperty(VOTED_FOR_KEY, metadata.getVotedFor().toString());
+
+    try(BufferedWriter out = new BufferedWriter(
+        new OutputStreamWriter(new AtomicFileOutputStream(file), StandardCharsets.UTF_8))) {
+      properties.store(out, "");
+    }
+    return metadata;
+  }
+```
+
+## 6. CorruptionPolicy
+
+RaftServerConfigKeys的内部类
+
+```java
+    enum CorruptionPolicy {
+      /** Rethrow the exception. */
+      EXCEPTION,
+      /** Print a warn log message and return all uncorrupted log entries up to the corruption. */
+      WARN_AND_RETURN;
+
+      public static CorruptionPolicy getDefault() { 
+        return EXCEPTION;
+      }
+
+      public static <T> CorruptionPolicy get(T supplier, Function<T, CorruptionPolicy> getMethod) {
+        return Optional.ofNullable(supplier).map(getMethod).orElse(getDefault());
+      }
+    }
+```
+
+## 7. RaftStorage
+
+在看完RaftStorageDirectory，RaftStorageMetadataFile, CorruptionPolicy后，现在，可以将目光转移到RaftStorage类中
+
+```java
+public interface RaftStorage extends Closeable {
+  Logger LOG = LoggerFactory.getLogger(RaftStorage.class);
+
+  /** Initialize the storage. */
+  void initialize() throws IOException;
+
+  /** @return the storage directory. */
+  RaftStorageDirectory getStorageDir();
+
+  /** @return the metadata file. */
+  RaftStorageMetadataFile getMetadataFile();
+
+  /** @return the corruption policy for raft log. */
+  CorruptionPolicy getLogCorruptionPolicy();
+
+  static Builder newBuilder() {
+    return new Builder();
+  }
+
+  enum StartupOption {
+    /** Format the storage. */
+    FORMAT,
+    RECOVER
+  }
+
+  class Builder {
+
+    private static final Method NEW_RAFT_STORAGE_METHOD = initNewRaftStorageMethod();
+
+    private static Method initNewRaftStorageMethod() {
+      final String className = RaftStorage.class.getPackage().getName() + ".StorageImplUtils";
+      //final String className = "org.apache.ratis.server.storage.RaftStorageImpl";
+      final Class<?>[] argClasses = { File.class, CorruptionPolicy.class, StartupOption.class, long.class };
+      try {
+        final Class<?> clazz = ReflectionUtils.getClassByName(className);
+        return clazz.getMethod("newRaftStorage", argClasses);
+      } catch (Exception e) {
+        throw new IllegalStateException("Failed to initNewRaftStorageMethod", e);
+      }
+    }
+
+    private static RaftStorage newRaftStorage(File dir, CorruptionPolicy logCorruptionPolicy,
+        StartupOption option, SizeInBytes storageFreeSpaceMin) throws IOException {
+      try {
+        return (RaftStorage) NEW_RAFT_STORAGE_METHOD.invoke(null,
+            dir, logCorruptionPolicy, option, storageFreeSpaceMin.getSize());
+      } catch (IllegalAccessException e) {
+        throw new IllegalStateException("Failed to build " + dir, e);
+      } catch (InvocationTargetException e) {
+        Throwable t = e.getTargetException();
+        if (t.getCause() instanceof IOException) {
+          throw IOUtils.asIOException(t.getCause());
+        }
+        throw IOUtils.asIOException(e.getCause());
+      }
+    }
+
+
+    private File directory;
+    private CorruptionPolicy logCorruptionPolicy;
+    private StartupOption option;
+    private SizeInBytes storageFreeSpaceMin;
+
+    public Builder setDirectory(File directory) {
+      this.directory = directory;
+      return this;
+    }
+
+    public Builder setLogCorruptionPolicy(CorruptionPolicy logCorruptionPolicy) {
+      this.logCorruptionPolicy = logCorruptionPolicy;
+      return this;
+    }
+
+    public Builder setOption(StartupOption option) {
+      this.option = option;
+      return this;
+    }
+
+    public Builder setStorageFreeSpaceMin(SizeInBytes storageFreeSpaceMin) {
+      this.storageFreeSpaceMin = storageFreeSpaceMin;
+      return this;
+    }
+
+    public RaftStorage build() throws IOException {
+      return newRaftStorage(directory, logCorruptionPolicy, option, storageFreeSpaceMin);
+    }
+  }
+}
+```
+
