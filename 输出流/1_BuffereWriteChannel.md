@@ -24,6 +24,27 @@
 * preallocateIfNecessary(long, CheckedBiFunction\<FileChannel, Long, Long, IOExcepiton>)
 
 ```java
+void write(byte[] b) throws IOException {
+    int offset = 0;
+    while(offset < b.length) {
+        int toPut = Math.min(b.length - offset, writeBuffer.reamining());
+        writeBuffer.put(b, offset, toPut);
+        offset += toPut;
+        if(writeBuffer.remaining() == 0) {
+            flushBuffer();
+        }
+    }
+}
+```
 
+write(byte[])方法，是将数据接入到ByteBuffer中，若ByteBuffer写满了，则调用flushBuffer()方法将ByteBuffer中的数据写到OS的buffer/cache中，这里并没有调用FileChannel.sync()方法，换言之，并没有强制刷盘
+
+```java
+void preallocateIfNececessary(long size, CheckedBiFunction<FileChannel, Long, Long, IOException> preallocate) throws IOException{
+    final long outstanding = writeBuffer.position() + size;
+    if(fileChannel.positon() + outstanding > fileChannel.size()) {
+        preallocate.apply(fileChannel, outstanding);
+    }
+}
 ```
 

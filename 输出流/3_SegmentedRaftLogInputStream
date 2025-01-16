@@ -1,0 +1,156 @@
+## 1. 前言
+
+## 2. 先看SegmentedRaftLogReader
+
+这里需要注意的是FileInpustStream.mark(int readlimit)方法中对于形参readlimit的解释
+
+```java
+Params: readlimit - the maximum limit of bytes that can be read before the mark position becomes invalid
+```
+
+mark(int)方法会在当前位置设置标记，当调用FileInputStream.reset()方法时，将输入流的位置回退到标记位置，形参中的int readlimit表示在调用mark()后，最多可读取的字节数。这应该是在调用mark()方法后，会将当前及后续读取的数据都缓存起来，所以这个readlimit可以理解为有效buffer的大小
+
+理解了mark(int)方法后，可以看以下decodeEntry()方法
+
+MAX_OP_SIZE是一个logEntry最大的字节数，为32MB
+
+```java
+private LogEntryProto decodeEntry() throws IOException {
+    limiter.setLimit(MAX_OP_SIZE); //设置接下来最多读取32MB字节的数据
+    in.mark(MAX_OP_SIZE); //设置标记位
+    byte nextByte;
+    
+    try {
+        nextByte = in.readByte(); //1
+    } catch(EOFException eof) {
+        return null;
+    }
+    
+    //2
+    if(SegmentedRaftLogFormat.isTerminator(nextByte)){
+        verifyTerminator();
+        return null;
+    }
+    
+    int entryLength = CodedInputStream.readRawVarint32(nextByte, in); //这里是entrySize，整型
+    if(entryLength > MAX_OP_SIZE) {
+        throw new IOException();
+    }
+    
+    //这里是是对entrySize使用protobuf编码后的字节数量1-5字节
+    final int varintLength = CodedOuputStream.computeUInt32SizeNoTag(entryLength);
+    
+    final int totalLength = varintLength + entryLength;
+    checkBufferSize(totalLength);
+    //因为我们读取了使用protobuf编码后的字节数量1-5字节，调用in.reset()重置输入流
+    in.reset();
+    in.mark(MAX_OP_SIZE); //再次打上标记位
+    
+    //这里说明一条entry最多4KB，但是mark中最大的buffer是32MB，32MB指的是一个文件最大的大小，4KB指的是一条entry最大的大小，NoNo，一条entry最大的大小并不是1KB，解决的办法在checkBufferSize()中
+    IOUtils.readFully(in, temp, 0, totalLength);
+    
+    //verify checksum
+    checksum.reset();
+    checksum.update(temp, 0, totalLength);
+    int expectedChecksum = in.readInt();
+    int calculatedChecksum = (int) checksum.getValue();
+    
+    if(expetedChecksum != calculatedChecksum) {
+        throw new ChecksumException();
+    }
+    
+    return LogEntryProto.parseFrom(CodedInputStream.newInstance(temp, varintLength, entryLength));
+}
+```
+
+1. 先读取一个字节，有两个作用，一个是用来判断是否读到文件尾；二是用来调用CodedInputStream.readRawVarint32(nextByte, in)方法使用
+
+2. 因为logEntry的前1-5个字节是序列化后的LogEntry的size，其第一个字节一定不为0，若其为0，就需要对后续字节流进行校验；首先，verifyTerminator在验证成功时，会正常返回，这样会执行**return null**，但是verifyTerminator()在发现文件破损的情况下，会抛出IOException
+
+   这里需要注意的是，在verifyTerminator()方法中，可以预料到会持续读取数据流，势必会改变数据流的偏移量(用偏移量不准确，先这么理解)
+
+   ```java
+   void verifyTerminator() throws IOException {
+        // The end of the log should contain 0x00 bytes.
+        // If it contains other bytes, the log itself may be corrupt.
+       limiter.clearLimit();
+       int numRead = -1, idx = 0;
+       while (true) {
+         try {
+           numRead = in.read(temp);
+           if (numRead == -1) {
+             return;
+           }
+           for (idx = 0; idx < numRead; idx++) {
+             if (!SegmentedRaftLogFormat.isTerminator(temp[idx])) {
+               throw new IOException("Read extra bytes after the terminator!");
+             }
+           }
+         } finally {
+           // After reading each group of bytes, we reposition the mark one
+           // byte before the next group. Similarly, if there is an error, we
+           // want to reposition the mark one byte before the error
+           if (numRead != -1) {
+             in.reset();
+             IOUtils.skipFully(in, idx); //跳过整个entry或者IOException处
+             in.mark(temp.length + 1); //在此进行标记
+             IOUtils.skipFully(in, 1); //跳到下一个字节
+           }
+         }
+       }
+     }
+   ```
+
+   乍一看finally语块中**if (numRead != -1)**这个条件好像没用，因为在while语句中，当numRead=-1时，直接返回了。但问题是finally语块中的代码会在return前执行，如图所示
+
+   ```java
+   public class TryCatchDemo {
+       public static void test(int i) {
+           try {
+               System.out.println("in try");
+               if(i % 2 == 0)
+                   return;
+               System.out.println("demo");
+           } finally {
+               System.out.println("in finally");
+               try {
+                   TimeUnit.SECONDS.sleep(3);
+               } catch (InterruptedException e) {
+                   throw new RuntimeException(e);
+               }
+           }
+       }
+   
+       public static void main(String[] args) {
+           test(2);
+       }
+   }
+   ```
+
+   ![1737038220967](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1737038220967.png)
+
+   可以看到，在每一遍循环之后，都在finally语块中都调用了in.reset()等相关方法。这里temp这个buf的大小为4096Byte，我们假设第一次读取校验成功，那么此时，current position指向4096的位置，markPosition指向0的位置，0-4095这4096Byte的数据已经校验完毕，idx=4095
+
+   ![1737037411557](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1737037411557.png)
+
+接下来，调用in.reset()，将current position置为0；IOUtils.skipFully(in,  idx)过滤掉4095个字节，那么current position指向了4095的位置；调用in.mark(temp.length + 1)，在4095位置进行了标记。调用IOUtils.skipFully(in, 1)将current position指向了4096
+
+![1737037705604](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1737037705604.png)
+
+接下来进行第二次读取，假设endPosition为5000，此时numRead=(5000-4096+1)=905，idx=904，在校验到5000这个字节时失败，那么会抛出异常，在执行完finally语块后，会将mark标记在4999处，即if there is an error, we want to repostion the mark one byte before the error
+
+回到checkBufferSize(int)中，这里可以对temp这个buf进行动态的扩容，但并不会缩容哦
+
+```java
+private void checkBufferSize(int entryLength) {
+    Preconditions.assertTrue(entryLength <= MAX_OP_SIZE);
+    int length = temp.length;
+    if(length < entryLength) {
+        while(length < entryLength) {
+            length = Math.min(length * 2, MAX_OP_SIZE);
+        }
+        temp = new byte[length];
+    }
+}
+```
+
