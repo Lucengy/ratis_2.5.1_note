@@ -453,7 +453,7 @@ targetLength用来指示position for truncation
 
 newEndIndex用来指示new end index after the truncation
 
-还有一点需要注意的是，SegmentFileInfo也是value-based class
+还有一点需要注意的是，SegmentFileInfo也是value-based class。这里是这么理解newEndIndex的，因为SegmentFileInfo对象是value-based，其实例变量的状态在构造后不可改变。当对一个LogSegment进行truncate需要返回一个新的segmentFileInfo对象，这个对象记录了其endIndex，即truncate前的index，以及truncate之后的index，即newEndIndex，以及turncate的position/offset，即targetLength。可见SegmentFileInfo属于是瞬时对象，不断地创建和销毁，而且是一次性的。
 
 ```java
 static final class SegmentFileInfo {
@@ -463,10 +463,18 @@ static final class SegmentFileInfo {
     }
     
     private final long startIndex;
-    private final long endIndex;
+    private final long endIndex; //original end index
     private final boolean isOpen;
-    private final long targetLength;
-    private final long newEndIndex;
+    private final long targetLength; //position for truncation
+    private final long newEndIndex; //new endIndex after the truncation
+    
+    private SegmentFileInfo(long start, long end, boolean isOpen, long targetLength, long newEndIndex) {
+        this.startIndex = start;
+        this.endIndex = end;
+        this.isOpen = isOpen;
+        this.targetLength = targetLength;
+        this.newEndIndex = newEndIndex;
+    }
     
     File getFile(RaftStorage storage) {
         return LogSegmentStartEnd.valueOf(startIndex, endIndex, isOpen).getFile(storage);
@@ -508,6 +516,192 @@ static class TruncationSegments {
 }
 ```
 
+### 3. LogSegmentList
+
+持有一个LogSegment的list，每个LogSegment对象是一个SegmentedRaftLog文件在内存中的镜像。这里理一下，每个LogSegment持有一裤兜子LogRecord，一个LogSegmentList持有一裤兜子LogSegment
+
+实例变量比较简单
+
+* List\<LogSegment> segments = new ArrayList<>()
+* AutoCloseableReadWriteLock lock
+* long sizeInBytes
+
+构造器
+
+```java
+LogSegmentList(Object name) {
+    this.name = name;
+    this.lock = new AutoCloseableReadWriteLock(name);
+    this.sizeInBytes = 0;
+}
+```
+
+其isEmpty() size()方法针对的都是segments这个list对象的操作
+
+这里第一个 关注点是getTermIndex(long, long, LogSegment)方法
+
+```java
+LogEntryHeader[] getTermIndex(long startIndex, long realEnd, LogSegment openSegment) {
+    //构造LogEntryHeader空数组
+    final LogEntryHeader[] entries = new LogEntryHeaderj[Math.toIntExact(realEnd - startIndex)];
+    final int searchIndex;
+    long index = startIndex;
+    try(AutoClsoeableLock readLock = readLock()) {
+        searchIndex = Collection.binarySearcyh(segmetns, startIndex);
+        if(searchIndex > 0) { //segments这个list包含了startIndex
+            for(int i = searchIndex; i < segments.size() && index < realEnd; i ++) {
+                //找到起始的LogSegment
+                final LogSegment s = segments.get(i);
+                final int numerFromSegment = Math.toIntExact(Math.min(realEnd - index, s.getEndIndex() - index + 1));
+                getFromSegment(s, index, entries, Math.toIntExact(index - startIndex), numberFromSegment);
+                index += numberFromSegment;
+            }
+        }
+    }
+    
+    if(searchIndex < 0) {
+        //binarySearch并没有搜到，换言之segments中并没有包含startIndex的LogSegment
+        getFromSegment(openSegment, startIndex, entries, 0, entries.length);
+    } else { //搜到了，但是可能没搜完
+        getFromSegment(openSegment, startIndex, entries, Math.toIntExact(index, startIndex), Math.toIntExact(realEnd - index));
+    }
+    
+    return entries;
+}
+```
+
+add(LogSegment)方法只是单纯的向segments中增加一个LogSegment对象，更新SegmenetedRaftLogCache的sizeInBytes信息
+
+```java
+boolean add(LogSegment logSegment) {
+    try(AutoCloseable writeLock = writeLock()) {
+        sizeInBytes += logSegment.getTotalFileSize();
+        return segments.add(logSegment);
+    }
+}
+```
+
+### 4. 实例变量
+
+持有一个正在写的LogSegment和一裤兜子已经写完的LogSegment
+
+```java
+private final String name;
+private volatile LogSegment openSegment;
+private final LogSegmentList closedSegments;
+private final RaftStorage storage;
+private final int maxCachedSegments;
+private final CacheInvalidationPolicy evictionPolicy = new CacheInvalidationPolicyDefault();
+private final long maxSegmentCacheSize;
+```
+
+
+
+### 5. getFromSegment(LogSegment, long, LogEntryHeader[], int, int)方法
+
+这里是从LogSegment中提取多个LogRecord，从startIndex开始后的size个，将其放入到LogEntryHeader中开始的位置上
+
+首先，比对LogSegment中最后一个LogEntry的index和想要提取的LogRecord的数量，取LogSegment中剩余LogRecord的数量和size的最小值作为循环结束条件。遍历LogSegment中的LogRecord，提取其EntryHeader信息放入到LogEntryHeader数组的对应位置上。
+
+这里不会出现数组越界的情况，因为对endIndex做了边界的考虑。
+
+```java
+private static void getFromSegment(LogSegment segment, long startIndex, LogEntryHeader[] entries, int offset, int size) {
+    long endIndex = segment.getEndIndex();
+    endIndex = Math.min(endIndex, startIndex + size - 1);
+    int index = offset;
+    for (long i = startIndex; i < endIndex; i ++) {
+        entries[index ++] = Optinal.ofNullable(segment.getLogRecord(i)).map(LogRecord::getLogEntryHeader).orElse(null);
+    }
+}
+```
+
+
+
 ## 7. SegmentedRaftLog
 
 入口方法在appendEntryImpl(LogEntryProto)中
+
+```java
+  @Override
+  public List<CompletableFuture<Long>> appendImpl(List<LogEntryProto> entries) {
+    checkLogState();
+    if (entries == null || entries.isEmpty()) {
+      return Collections.emptyList();
+    }
+    try(AutoCloseableLock writeLock = writeLock()) {
+      final TruncateIndices ti = cache.computeTruncateIndices(server::notifyTruncatedLogEntry, entries);
+      final long truncateIndex = ti.getTruncateIndex();
+      final int index = ti.getArrayIndex();
+      LOG.debug("truncateIndex={}, arrayIndex={}", truncateIndex, index);
+
+      final List<CompletableFuture<Long>> futures;
+      if (truncateIndex != -1) {
+        futures = new ArrayList<>(entries.size() - index + 1);
+        futures.add(truncate(truncateIndex));
+      } else {
+        futures = new ArrayList<>(entries.size() - index);
+      }
+      for (int i = index; i < entries.size(); i++) {
+        futures.add(appendEntry(entries.get(i))); //这里是入口
+      }
+      return futures;
+    }
+  }
+```
+
+appednEntry(LogEntryProto)方法调用appendEntryImpl(LogEntryProto)方法
+
+```java
+  protected CompletableFuture<Long> appendEntryImpl(LogEntryProto entry) {
+    final Timer.Context context = getRaftLogMetrics().getRaftLogAppendEntryTimer().time();
+    checkLogState();
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("{}: appendEntry {}", getName(), LogProtoUtils.toLogEntryString(entry));
+    }
+    try(AutoCloseableLock writeLock = writeLock()) {
+      validateLogEntry(entry);
+      final LogSegment currentOpenSegment = cache.getOpenSegment();
+      if (currentOpenSegment == null) {
+        cache.addOpenSegment(entry.getIndex());
+        fileLogWorker.startLogSegment(entry.getIndex());
+      } else if (isSegmentFull(currentOpenSegment, entry)) {
+        cache.rollOpenSegment(true);
+        fileLogWorker.rollLogSegment(currentOpenSegment);
+      } else if (currentOpenSegment.numOfEntries() > 0 &&
+          currentOpenSegment.getLastTermIndex().getTerm() != entry.getTerm()) {
+        // the term changes
+        final long currentTerm = currentOpenSegment.getLastTermIndex().getTerm();
+        Preconditions.assertTrue(currentTerm < entry.getTerm(),
+            "open segment's term %s is larger than the new entry's term %s",
+            currentTerm, entry.getTerm());
+        cache.rollOpenSegment(true);
+        fileLogWorker.rollLogSegment(currentOpenSegment);
+      }
+
+      //TODO(runzhiwang): If there is performance problem, start a daemon thread to checkAndEvictCache
+      checkAndEvictCache();
+
+      // If the entry has state machine data, then the entry should be inserted
+      // to statemachine first and then to the cache. Not following the order
+      // will leave a spurious entry in the cache.
+      CompletableFuture<Long> writeFuture =
+          fileLogWorker.writeLogEntry(entry).getFuture();
+      if (stateMachineCachingEnabled) {
+        // The stateMachineData will be cached inside the StateMachine itself.
+        cache.appendEntry(LogProtoUtils.removeStateMachineData(entry),
+            LogSegment.Op.WRITE_CACHE_WITH_STATE_MACHINE_CACHE);
+      } else {
+        cache.appendEntry(entry, LogSegment.Op.WRITE_CACHE_WITHOUT_STATE_MACHINE_CACHE);
+      }
+      return writeFuture;
+    } catch (Exception e) {
+      LOG.error("{}: Failed to append {}", getName(), LogProtoUtils.toLogEntryString(entry), e);
+      throw e;
+    } finally {
+      context.stop();
+    }
+  }
+```
+
+这几涉及到了之前要用到的SegmentedRaftLogCache和SegmentedRaftLogWorker的相关方法

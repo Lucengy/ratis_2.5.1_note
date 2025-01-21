@@ -154,3 +154,33 @@ private void checkBufferSize(int entryLength) {
 }
 ```
 
+接下来是verifyHeader()方法，就是验证文件的前4个字节是否为**"RaftLog1".getBytes()**
+
+1. 当校验成功时，返回true
+2. 当部分校验成功时，返回false，部分校验成功，意味着header只成功写入了部分，剩下的为Terminator字符填充
+3. 当不满足1和2时，证明header部分的字节被破坏，认为该文件已经破损，抛出异常
+
+```java
+  boolean verifyHeader() throws IOException {
+    final int headerLength = SegmentedRaftLogFormat.getHeaderLength();
+    final int readLength = in.read(temp, 0, headerLength);
+    Preconditions.assertTrue(readLength <= headerLength);
+    final int matchLength = SegmentedRaftLogFormat.matchHeader(temp, 0, readLength);
+    Preconditions.assertTrue(matchLength <= readLength);
+
+    if (readLength == headerLength && matchLength == readLength) {
+      // The header is matched successfully
+      return true;
+    } else if (SegmentedRaftLogFormat.isTerminator(temp, matchLength, readLength - matchLength)) {
+      // The header is partially written
+      return false;
+    }
+    // The header is corrupted
+    throw new CorruptedFileException(file, "Log header mismatched: expected header length="
+        + SegmentedRaftLogFormat.getHeaderLength() + ", read length=" + readLength + ", match length=" + matchLength
+        + ", header in file=" + StringUtils.bytes2HexString(temp, 0, readLength)
+        + ", expected header=" + SegmentedRaftLogFormat.applyHeaderTo(StringUtils::bytes2HexString));
+  }
+```
+
+剩下api方法，分为为readEntry()和scanEntry()方法

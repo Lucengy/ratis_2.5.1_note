@@ -65,8 +65,6 @@ appendTransaction(request, context, cacheEntry)方法最终调用ServerState.app
   }
 ```
 
-
-
 ServerState.appendLog(TransactionContext)方法调用了RaftLog.append(long, TransactionContext)方法，代码在RaftLogBase类中
 
 ```java
@@ -131,3 +129,8 @@ StateMachineUpdater.run()方法调用applyLog()方法，循环调用applyLogToSt
 * 针对已经committed的信息，leader调用StateMachine.applyTransacionSerial(TransactionContext)和StateMachine.applyTransaction(TransactionContext)方法
 
 BackTo Ozone中的StateMachine实现类OzoneManagerStateMachine
+
+## 3. notifySenders()
+
+回到RaftServerImpl.appendTransaction()方法，从leaderState.notifySenders()开始leader->follower之旅
+
