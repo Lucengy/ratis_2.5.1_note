@@ -44,7 +44,7 @@ public interface SnapshotInfo {
 
 该Jira是为了给Admin提供了一个takeSnapshot的接口，但同时也为我们解释了由StateMachineUpdater这个单独的线程来触发takeSnapshot动作。
 
-这里还有一点需要记录的，根据RATIS-338，leader在RPC中加入了commitIndexInfo，即各个peer的commitIndex信息，分别在appendEntries和ClientReply中加入了这部分信息。在takeSnapshot动作中，raftLog需要purge掉过期的logEntries，那么从哪里开始purge呢？在RATIS-850中，最初的设计是从选取所有peer中最小的commitIndex作为purge的index，在Ozone中发现如果存在掉队的follower，那么其commitIndex会较小，这样其他peer就会停止purge日志，jira中是这样描述的
+这里还有一点需要记录的，根据RATIS-338，leader在RPC中加入了commitIndexInfo，即各个peer的commitIndex信息，分别在appendEntries和ClientReply中加入了这部分信息。在takeSnapshot动作中，raftLog需要purge掉过期的logEntries，那么从哪里开始purge呢？在RATIS-850中，最初的设计是从选取所有peer中commitIndex以及snapshotIndex的最小值作为purge的index，在Ozone中发现如果存在掉队的follower，那么其commitIndex会较小，这样其他peer就会停止purge日志，jira中是这样描述的
 
 ```
 Ratis logs are purged only up to the least commit index on all the peers. But if one peer is down, it stop log purging on all the peers. 
@@ -91,8 +91,6 @@ message RaftClientReplyProto {
   repeated CommitInfoProto commitInfos = 15;
 }
 ```
-
-
 
 ## 2. StateMachineUpdater
 
@@ -279,3 +277,4 @@ private MemoizedSupplier<List<CompletableFuture<Message>>> applyLog() throws Raf
 
 在takeSnapshot的最后，需要调用raftLog.purge()方法，清除多余的log entires，purgeIndex的相关内容在前言中已经详细说明，这里不再赘述
 
+## 3. SnapshotManager
