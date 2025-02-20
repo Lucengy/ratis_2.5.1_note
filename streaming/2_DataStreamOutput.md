@@ -1,5 +1,15 @@
 ## 1. 前言
 
+根据RATIS-1085中的描述，在Streaming Pipeline中需要先发送一个header信息，即RaftClientRequest对象，以便server在收到该写请求时，能够正常处理，这就引发了一个新的问题，就是RaftClientReuqest对象究竟时怎么一个事，以及SM是怎么跟它进行交互的
+
+```
+In a stream request, the client should send a RaftClientRequest (without data) as the header so that the state machine at the server can process the request as a normal RaftClientRequest.
+
+We may consider using Protobuf to encode RaftClientRequest. The raw data will be streamed after the RaftClientRequest.
+```
+
+
+
 如JavaDoc所说，是一个异步的输出流对象，主要包含writeAsync()相关方法
 
 ```java
@@ -54,3 +64,17 @@ public interface DataStreamOutput extends CloseAsync<DataStreamReply> {
 }
 ```
 
+## 2. DataStreamOutputRpc
+
+继承自DataStreamOutput
+
+```java
+public interface DataStreamOutputRpc extends DataStreamOutput {
+  /** Get the future of the header request. */
+  CompletableFuture<DataStreamReply> getHeaderFuture();
+}
+```
+
+## 3. DataStreamOutputImpl
+
+实现类，用来处理输出流的逻辑。
