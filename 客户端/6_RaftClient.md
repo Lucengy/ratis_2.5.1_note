@@ -61,3 +61,25 @@ public interface RaftClient extends Closeable {
 
 静态内部抽象类
 
+### 2. RaftPeerList
+
+静态内部类，用来存在当前raftGroup中的RaftPeer列表
+
+只有遍历和批量替换这两种方法
+
+```java
+static class RaftPeerList implements Iterable<RaftPeer> {
+    private final AtomicReference<List<RaftPeer>> list = new AtomicReference<>();
+    
+    @Override
+    public Iterator<RaftPeer> iterator() {
+        return list.get().iterator();
+    }
+    
+    void set(Collection<RaftPeer> newPeers) {
+        Preconditions.assertTrue(!newPeers.isEmpty());
+        list.set(Collections.unmodifiableList(new ArrayList<>(newPeers)));
+    }
+}
+```
+

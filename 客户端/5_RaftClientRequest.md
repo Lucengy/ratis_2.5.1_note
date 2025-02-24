@@ -1,3 +1,109 @@
+## 0. 前言
+
+为什么会使用到RaftClientRequest类，以及它是怎么转换成protobuf(grpc)中要传输的序列化后的字节流的，答案在ClientProtoUtils.toRaftClientRequestProto(RaftClientRequest)方法中
+
+```java
+static RaftClientRequestProto toRaftClientRequestProto(RaftClientRequest request) {
+    final RaftClientRequestProto.Builder b = RaftClientRequestProto.newBuilder()
+        .setRpcRequest(toRaftRpcRequestProtoBuilder(request));
+    if (request.getMessage() != null) {
+      b.setMessage(toClientMessageEntryProtoBuilder(request.getMessage()));
+    }
+
+    final RaftClientRequest.Type type = request.getType();
+    switch (type.getTypeCase()) {
+      case WRITE:
+        b.setWrite(type.getWrite());
+        break;
+      case DATASTREAM:
+        b.setDataStream(type.getDataStream());
+        break;
+      case FORWARD:
+        b.setForward(type.getForward());
+        break;
+      case MESSAGESTREAM:
+        b.setMessageStream(type.getMessageStream());
+        break;
+      case READ:
+        b.setRead(type.getRead());
+        break;
+      case STALEREAD:
+        b.setStaleRead(type.getStaleRead());
+        break;
+      case WATCH:
+        b.setWatch(type.getWatch());
+        break;
+      default:
+        throw new IllegalArgumentException("Unexpected request type: " + request.getType()
+            + " in request " + request);
+    }
+
+    return b.build();
+  }
+```
+
+有关RaftrClientRequestProto的定义如下
+
+```protobuf
+message RaftClientRequestProto {
+  RaftRpcRequestProto rpcRequest = 1;
+  ClientMessageEntryProto message = 2;
+
+  oneof Type {
+    WriteRequestTypeProto write = 3;
+    ReadRequestTypeProto read = 4;
+    StaleReadRequestTypeProto staleRead = 5;
+    WatchRequestTypeProto watch = 6;
+    MessageStreamRequestTypeProto messageStream = 7;
+    DataStreamRequestTypeProto dataStream = 8;
+    ForwardRequestTypeProto forward = 9;
+  }
+}
+```
+
+leader在收到RaftClientRequestProto时，转换为RaftClientRequest对象，这部分逻辑在GrpcClientProtocolService的内部类RequestStreamObserver.onNext()方法中
+
+```java
+    @Override
+    public void onNext(RaftClientRequestProto request) {
+      try {
+        final RaftClientRequest r = ClientProtoUtils.toRaftClientRequest(request);
+        processClientRequest(r);
+      } catch (Exception e) {
+        responseError(e, () -> "onNext for " + ClientProtoUtils.toString(request) + " in " + name);
+      }
+    }
+```
+
+有关ClientProtoUtils中的toRaftClientRequest(RaftClientRequestProto)方法，如下
+
+```java
+static RaftClientRequest toRaftClientRequest(RaftClientRequestProto p) {
+    final RaftClientRequest.Type type = toRaftClientRequestType(p);
+    final RaftRpcRequestProto request = p.getRpcRequest();
+
+    final RaftClientRequest.Builder b = RaftClientRequest.newBuilder();
+
+    final RaftPeerId perrId = RaftPeerId.valueOf(request.getReplyId());
+    if (request.getToLeader()) {
+      b.setLeaderId(perrId);
+    } else {
+      b.setServerId(perrId);
+    }
+    return b.setClientId(ClientId.valueOf(request.getRequestorId()))
+        .setGroupId(ProtoUtils.toRaftGroupId(request.getRaftGroupId()))
+        .setCallId(request.getCallId())
+        .setMessage(toMessage(p.getMessage()))
+        .setType(type)
+        .setSlidingWindowEntry(request.getSlidingWindowEntry())
+        .setRoutingTable(getRoutingTable(request))
+        .setTimeoutMs(request.getTimeoutMs())
+        .build();
+  }
+```
+
+
+
 ## 1. 祖宗接口RaftRpcMessage
 
 只有四个简单的api
@@ -93,6 +199,8 @@ public abstract class RaftClientMessage implements RaftRpcMessage {
 ```
 
 ## 3. 实现类RaftClientRequest
+
+先记录RaftClientRequest的定义，它并没有实现SlidingWindow.ClientSideRequest接口
 
 根据RaftClientRequestProto中的定义，RaftClientRequest目前有7种类型
 
