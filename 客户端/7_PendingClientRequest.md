@@ -131,8 +131,6 @@ static class PendingOrderedRequest extends PendingClientRequest implements Slidi
 }
 ```
 
-
-
 看一下caller是怎么调用构造器的
 
 ```java

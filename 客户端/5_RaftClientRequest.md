@@ -42,7 +42,7 @@ static RaftClientRequestProto toRaftClientRequestProto(RaftClientRequest request
   }
 ```
 
-有关RaftrClientRequestProto的定义如下
+有关RaftClientRequestProto的定义如下
 
 ```protobuf
 message RaftClientRequestProto {
