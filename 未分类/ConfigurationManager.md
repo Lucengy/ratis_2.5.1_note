@@ -1,11 +1,54 @@
 ## 1. PeerConfiguration
 
-持有两个相同类型的map，一个是表示Leader/Candidate/Follower，另外一个是用来表示Follower
+持有两个相同类型的map，一个是表示Leader/Candidate/Follower，另外一个是用来表示Listener
 
 * Map<RaftPeerId, RaftPeer> peers;
 * Map<RaftPeerId, RaftPeer> listeners
 
-稍微需要在意的点是peers和listeners是没有overlap的
+稍微需要在意的点是peers和listeners这两个map是没有overlap的
+
+首先看其构造器
+
+```java
+PeerConfiguration(Iterable<RaftPeer> peers) {
+    this(peers, Collections.emptyList());
+}
+
+PeerConfiguration(Iterable<RaftPeer> peers, Iterable<RaftPeer> listeners) {
+    this.peers = newMap(peers, "peers", Collections.emptyMap());
+    this.listeners = Optional.ofNullable(listeners)
+        .map(l -> newMap(listeners, "listeners", this.peers))
+        .orElseGet(Collections::emptyMap);
+}
+```
+
+无论是peers还是listeners，在赋值时都使用了静态方法newMap()，该方法用来校验两件事
+
+* 对于要添加的RaftPeer对象，如果存在于existing这个map中，那么抛出异常
+* 对于要添加的RaftPeer对象，如果Iterable中存在着两个RaftPeer其peerId值相同，那么抛出异常
+
+感觉方法用处不大，单纯的为了写而写的一个方法，确实是国人刷commiter用的
+
+```java
+static Map<RaftPeerId, RaftPeer> newMap(Iterable<RaftPeer> peers, String name, Map<RaftPeerId, RaftPeer existing) {
+    final Map<RaftPeerId, RaftPeer> map = new HashMap<>();
+    
+    for(RaftPeer p : peers) {
+        if(existing.containsKey(p.getId())) {
+            throw new IllegalArgumentException();
+        }
+        
+        final RaftPeer previous = map.putIfAbsent(p.getId(), p);
+        if(previous != null) {
+            throw new IllegalArgumentException();
+        }
+    }
+    
+    return Collections.unmodifiableMap(map);
+}
+```
+
+
 
 这里有几个稍稍晦涩的方法
 
@@ -23,7 +66,7 @@
      }
    ```
 
-   目前来看，peers中的RaftPeer的Role类型只能是Follower，
+   目前来看，peers中的RaftPeer的Role类型只能是Follower，尽管在类描述中写了peers可以代表Leader/Candidate，但是目前来看只对RaftPeerRole.FOLLOWER进行了判断
 
 2. getPeer(RaftPeerId, RaftPeerRole...)
 
@@ -100,7 +143,7 @@
 
 ## 2. RaftConfigurationImpl
 
-持有两个PeerConfiguration对象，一个用来表示currentConf，一个用来表示oldConf，这里需要注意注释中表述的，只有当且仅当conf处在transitional的状态时，oldConf才不为null。同时，这个类时imuutable，即所有的field都被final修饰，class被final修饰。
+持有两个PeerConfiguration对象，一个用来表示currentConf，一个用来表示oldConf，这里需要注意注释中表述的，只有当且仅当conf处在transitional的状态时，oldConf才不为null。同时，这个类时immutable，即所有的field都被final修饰，class被final修饰。
 
 ```java
 /**
@@ -120,7 +163,7 @@ final class RaftConfigurationImpl implements RaftConfiguration
 * final PeerConfiguration conf
 * final long logEntryIndex
 
-需要提一下isTransitional()和isStable()方法，入类描述中所说，当且仅当oldConf为null时，此对象为stable状态，否咋额为transitional状态
+需要提一下isTransitional()和isStable()方法，入类描述中所说，当且仅当oldConf为null时，此对象为stable状态，否则为transitional状态
 
 ```java
   boolean isTransitional() {

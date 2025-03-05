@@ -423,3 +423,164 @@ GprcService使用的是Builder模式，其build()方法的caller为GrpcFactory�
 * RaftClientRpcWithProxy持有一个PeerProxyMap\<PROXY>对象，该对象本身是一个map，用来做raftPeer->GrpcClientProtocolClient的缓存
 * RaftServerRpcWithProxy持有一个Supplier\<PeerProxyMap\<PROXY>>对象，用来做raftPeer->GrpcClientProtocolService的缓存
 
+## 5. RaftServer接口
+
+### 1. Division接口
+
+用来表示一个RaftServer上指定RaftGroup的一个实例对象
+
+```java
+interface Division extends Closeable {
+    DivisionProperties properties();
+    
+    RaftGroupMemeberId getMemberId();
+    
+    default RaftPeerId getId() {
+        return getMemberId().getPeerId();
+    }
+        
+    default RaftPeer getPeer() {
+        return Optional.ofNullable(getRaftConf().getPeer(getId()))
+            .orElseGet(() -> getRaftServer().getPeer());
+    }
+    
+    DivisionInfo getInfo();
+    
+    default RaftGroup getGroup() {
+      Collection<RaftPeer> allFollowerPeers =
+          getRaftConf().getAllPeers(RaftProtos.RaftPeerRole.FOLLOWER);
+      Collection<RaftPeer> allListenerPeers =
+          getRaftConf().getAllPeers(RaftProtos.RaftPeerRole.LISTENER);
+      Iterable<RaftPeer> peers = Iterables.concat(allFollowerPeers, allListenerPeers);
+      return RaftGroup.valueOf(getMemberId().getGroupId(), peers);
+    }
+    
+    RaftConfiguration getRaftConf();
+
+    /** @return the {@link RaftServer} containing this division. */
+    RaftServer getRaftServer();
+
+    /** @return the {@link RaftServerMetrics} for this division. */
+    RaftServerMetrics getRaftServerMetrics();
+
+    /** @return the {@link StateMachine} for this division. */
+    StateMachine getStateMachine();
+
+    /** @return the raft log of this division. */
+    RaftLog getRaftLog();
+
+    /** @return the storage of this division. */
+    RaftStorage getRaftStorage();
+
+    /** @return the commit information of this division. */
+    Collection<CommitInfoProto> getCommitInfos();
+
+    /** @return the retry cache of this division. */
+    RetryCache getRetryCache();
+
+    /** @return the data stream map of this division. */
+    DataStreamMap getDataStreamMap();
+
+    /** @return the internal {@link RaftClient} of this division. */
+    RaftClient getRaftClient();
+
+    @Override
+    void close();
+}
+```
+
+### 2. RaftServer接口定义
+
+```java
+public interface RaftServer extends Closeable, RpcType.Get,
+    RaftServerProtocol, RaftServerAsynchronousProtocol,
+    RaftClientProtocol, RaftClientAsynchronousProtocol,
+    AdminProtocol, AdminAsynchronousProtocol {
+   
+  RaftPeerId getId();
+
+  /** @return the {@link RaftPeer} for this server. */
+  RaftPeer getPeer();
+
+  /** @return the group IDs the server is part of. */
+  Iterable<RaftGroupId> getGroupIds();
+
+  /** @return the groups the server is part of. */
+  Iterable<RaftGroup> getGroups() throws IOException;
+
+  Division getDivision(RaftGroupId groupId) throws IOException;
+
+  /** @return the server properties. */
+  RaftProperties getProperties();
+
+  /** @return the rpc service. */
+  RaftServerRpc getServerRpc();
+
+  /** @return the data stream rpc service. */
+  DataStreamServerRpc getDataStreamServerRpc();
+
+  /** @return the {@link RpcType}. */
+  default RpcType getRpcType() {
+    return getFactory().getRpcType();
+  }
+
+  /** @return the factory for creating server components. */
+  ServerFactory getFactory();
+
+  /** Start this server. */
+  void start() throws IOException;
+
+  LifeCycle.State getLifeCycleState();
+
+  /** @return a {@link Builder}. */
+  static Builder newBuilder() {
+    return new Builder();
+  }
+}
+```
+
+### 3. DivisionInfo接口
+
+用来藐视一个raft server Division对象
+
+```java
+public interface DivisionInfo {
+    RaftPeerRole getCurrentRole();
+    
+    default boolean isFollower() {
+        return getCurrentRole() == RaftPeerRole.FOLLOWER;
+    }
+    
+    default boolean isCandidate() {
+        return getCurrentRole() == RaftPeerRole.CANDIDATE;
+    }
+
+    /** Is this server division currently the leader? */
+    default boolean isLeader() {
+        return getCurrentRole() == RaftPeerRole.LEADER;
+    }
+
+    default boolean isListener() {
+        return getCurrentRole() == RaftPeerRole.LISTENER;
+    }
+
+    boolean isLeaderReady();
+    
+    RaftPeerId getLeaderId();
+    
+    LifeCycle.State getLifeCycleState();
+    
+    default boolean isAlive() {
+        return !getLifeCycleState().isClosingOrClosed();
+    }
+    
+    RoleInfoProto getRoleInfoProto();
+    
+    long getCurrentTerm();
+    
+    long getLastAppliedIndex();
+    
+    long[] getFollowerNextIndicies();
+}
+```
+
