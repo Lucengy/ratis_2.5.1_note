@@ -40,6 +40,31 @@ class VoteContext {
 
 ### 1. checkTerm
 
+```java
+private CheckTermResult checkTerm(long candidateTerm) {
+    if (phase == Phase.PRE_VOTE) {
+        return CheckTermResult.CHECK_LEADER;
+    }
+    // check term
+    final ServerState state = impl.getState();
+    final long currentTerm = state.getCurrentTerm();
+    if (currentTerm > candidateTerm) {
+        reject("current term " + currentTerm + " > candidate's term " + candidateTerm);
+        return CheckTermResult.FAILED;
+    } else if (currentTerm == candidateTerm) {
+        // check if this server has already voted
+        final RaftPeerId votedFor = state.getVotedFor();
+        if (votedFor != null && !votedFor.equals(candidateId)) {
+            reject("already has voted for " + votedFor + " at current term " + currentTerm);
+            return CheckTermResult.FAILED;
+        }
+        return CheckTermResult.CHECK_LEADER;
+    } else {
+        return CheckTermResult.SKIP_CHECK_LEADER; //currentTerm < candidateTerm
+    }
+}
+```
+
 
 
 ### 2. checkLeader
@@ -71,7 +96,13 @@ private boolean checkLeader() {
 }
 ```
 
-首先，看scheckLeadership中的逻辑
+首先，看checkLeadership中的逻辑。这里先简单聊一下，详细的解释放到LeaderStateImpl中去聊。这里的主逻辑无非是
+
+```
+每一个LogAppender对应一个Follower，根据其lastResponseTime的持续时间判断是否小于leader的超时时间。如果是，证明leader依旧掌权，如果不是，应该是发生了脑裂，那么此时leader应该下线退为follower.
+```
+
+这里有一种意外情况，就是当leader刚刚掌权时，并不符合上述的要求，所以有了前置的判断，判断leader是否刚刚掌权，如果是，直接返回true
 
 ```java
   /**
@@ -117,5 +148,68 @@ private boolean checkLeader() {
       stepDown(currentTerm, StepDownReason.LOST_MAJORITY_HEARTBEATS);
       return false;
   }
+```
+
+### 3. recognizeCandidate
+
+```java
+RaftPeer recognizeCandidate(long candidateTerm) {
+    final RaftPeer candidate = checkConf();
+    if(candidate == null)
+        return null;
+    
+    final CheckTermResult r = checkTerm(candidateTerm);
+    if(r == CheckTermResult.FAILED) {
+        return null;
+    }
+    
+    if(r == CheckTermResult.CHECK_LEADER && !checkLeader())
+        return null;
+    
+    return candiadate;
+}
+```
+
+这里用到了checkConf方法，根据JavaDoc，该方法用来检查指定的candidate是否在当前的conf中，VoteContext对应的是一个节点的投票信息，持有对应节点的RaftPeerId，即candiateId，同时其实例变量均使用final进行修饰，所以checkConf()方法并没有形参
+
+```java
+private RaftPeer checkConf() {
+    if(!conf.containsInConf(candidateId)) {
+        reject(candidateId + " is not in current conf " + conf.getCurrentPeers());
+        return null;
+    }
+    
+    return conf.getPeer(candidateId);
+}
+```
+
+### 4. decideVote
+
+```java
+boolean decideVote(RaftPeer candidate, TermIndex candidateLastEntry) {
+    if (candidate == null) {
+        return false;
+    }
+    // Check last log entry
+    final TermIndex lastEntry = impl.getState().getLastEntry();
+    final int compare = ServerState.compareLog(lastEntry, candidateLastEntry);
+    if (compare < 0) {
+        return log(true, "our last entry " + lastEntry + " < candidate's last entry " + candidateLastEntry);
+    } else if (compare > 0) {
+        return reject("our last entry " + lastEntry + " > candidate's last entry " + candidateLastEntry);
+    }
+
+    // Check priority
+    final RaftPeer peer = conf.getPeer(impl.getId());
+    if (peer == null) {
+        return reject("our server " + impl.getId() + " is not in the conf " + conf);
+    }
+    final int priority = peer.getPriority();
+    if (priority <= candidate.getPriority()) {
+        return log(true, "our priority " + priority + " <= candidate's priority " + candidate.getPriority());
+    } else {
+        return reject("our priority " + priority + " > candidate's priority " + candidate.getPriority());
+    }
+}
 ```
 
