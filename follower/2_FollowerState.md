@@ -153,3 +153,4 @@ FollowerState是Daemon的子类，即后台线程，其run()方法是一个死�
   }
 ```
 
+在RaftServerImpl.start()方法中，通过调用RoleInfo.startAsPeer()方法，将RaftPeer状态改为Follower，同时，构造了FollowerState实例对象，调用FollowerState.start()方法，因为FollowerState实现了Daemon接口，所以实际上是启动一个新的线程，执行run()方法，在run()方法中，通过调用RaftServerImpl.changeToCandidate()方法，将RaftPeer的状态从Follower改为了Candidate，这部分的逻辑在RaftServerImpl.changeToCandidate方法中

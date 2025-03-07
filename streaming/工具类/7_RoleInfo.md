@@ -51,6 +51,29 @@ private void startAsPeer(RaftPeerRole newRole) {
 
 在startFollowerState()方法中，构造了新的FollowerState对象，并调用其start()方法
 
+在FollowerState对象中，经过一定的election timeout，调用RaftServerImpl.changeToCandidate()方法，将RaftPeer的状态从Follower改为Candidate
+
+```java
+synchronized void changeToCandidate(boolean forceStartLeaderElection) {
+    Preconditions.assertTrue(getInfo().isFollower());
+    role.shutdownFollowerState();
+    setRole(RaftPeerRole.CANDIDATE, "changeToCandidate");
+    if (state.shouldNotifyExtendedNoLeader()) {
+        stateMachine.followerEvent().notifyExtendedNoLeader(getRoleInfoProto());
+    }
+    // start election
+    role.startLeaderElection(this, forceStartLeaderElection);
+}
+```
+
+changeToCandidate()方法中
+
+* 调用role.shutdownFollowerState()方法停止FollowerState线程
+* 调用setRole方法，修改RoleInfo的状态信息
+* 调用RoleInfo对象的startLeaderElection()方法，开启投票
+
+在RoleInfo的startLeaderElection方法中，构建新的LeaderElection对象，并调用其start()方法
+
 ## 2. 代码
 
 根据proto文件，Role of raft peer 包含以下几种角色
