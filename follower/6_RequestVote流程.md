@@ -18,6 +18,37 @@ service RaftServerProtocolService {
 }
 ```
 
+先看client侧发起的requestVote流程，此时Candidate为client，Follower为leader。入口方法在LeaderElection.submitRequests()方法中
+
+```java
+private int submitRequests(Phase phase, long electionTerm, TermIndex lastEntry,
+      Collection<RaftPeer> others, Executor voteExecutor) {
+    int submitted = 0;
+    for (final RaftPeer peer : others) {
+        final RequestVoteRequestProto r = ServerProtoUtils.toRequestVoteRequestProto(
+            server.getMemberId(), peer.getId(), electionTerm, lastEntry, phase == Phase.PRE_VOTE);
+        voteExecutor.submit(() -> server.getServerRpc().requestVote(r));
+        submitted++;
+    }
+    return submitted;
+}
+```
+
+这里的server.gertServerRpc().requestVote()方法，调用的是GrpcService.requestVote()方法，首先需要注意的是RequestVoteRequestProto的定义
+
+```protobuf
+message RequestVoteRequestProto {
+    RaftRpcRequestProto serverRequest = 1;
+    uint64 candidateTerm = 2;
+    TermIndexProto candidateLastEntry = 3;
+    bool preVote = 4;
+}
+```
+
+
+
+
+
 server端处理requestVote的流程在RaftServerImpl中
 
 ```java
@@ -32,7 +63,13 @@ server端处理requestVote的流程在RaftServerImpl中
   }
 ```
 
-该方法调用使用private修饰的同名方法
+该方法调用使用private修饰的同名方法，注意这里的实参都是Candidate发起RPC带过来的
+
+* phase: 目前有两种，分别是election和preVote
+* RaftPeerId: 用来标识candidate
+* RaftGroupId：用来标识group组信息
+* candidateTerm: 发起election的candidate携带的Term信息
+* candidateLastEntry: 发起election的candidate携带的log信息
 
 ```java
 private RequestVoteReplyProto requestVote(Phase phase,

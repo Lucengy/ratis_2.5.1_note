@@ -50,3 +50,11 @@
   private final AtomicReference<TermIndex> latestInstalledSnapshot = new AtomicReference<>();
 ```
 
+ServerState的入口方法为start()方法，该方法用来启动StateMachineUpdater这个线程
+
+```java
+void start() {
+    stateMachineUpdater.get().start();
+}
+```
+

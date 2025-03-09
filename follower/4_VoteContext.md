@@ -10,7 +10,13 @@ enum CheckTermResult {
 }
 ```
 
+从RequestVote流程过来的
 
+```java
+final VoteContext context = new VoteContext(this, phase, candidateId);
+```
+
+VoteContext构造前期中的RaftServerImpl，不需要多讲，phase和candidateId都是发起election的candidate的RPC中携带的信息，这里并没有存储term等相关信息哈？？？
 
 ```java
 class VoteContext {
@@ -65,14 +71,23 @@ private CheckTermResult checkTerm(long candidateTerm) {
 }
 ```
 
+这里存在三种情况，需要结合recognizedCandidate()方法去理解
 
+* FAILED，两种情况：当candidateTerm < currentTerm时；当candidateTerm==currentTerm，即当该follower在本term中已经投票，且投票不为candidate时
+* CHECK_LEADER，两种情况：当该rpc为preVote时；当candidateTerm==currentTerm，即当该follower在本term中未投票或者(已投票且投给candidate时)
+* SKIP_CHECK_LEADER：一种情况：当candidateTerm>currentTerm时
 
 ### 2. checkLeader
 
-可以看到，chekcLeaer中需要检测两方面
+可以看到，chekcLeaer中需要检测两方面。
 
 1. 该RaftServer是不是leader
 2. 该RaftServer为follower时，Leader是不是有效的
+
+​	这里有一点拗口的地方，checkLeader返回值是反着来的，即
+
+* 如果存在leader，返回false
+* 如果不存在leader，返回ture
 
 ```java
 private boolean checkLeader() {
@@ -183,6 +198,15 @@ private RaftPeer checkConf() {
 }
 ```
 
+对于CheckTermResult的返回值，recognizeCandiate()方法的处理逻辑
+
+* 当candidate不在该RaftPeer的conf中，返回null
+* 当checkTerm()方法返回FAILED时，返回null
+* 当checkTerm()方法返回CHECK_LEADER，但是checkLeader()返回false，即当前存在leader时，返回null。这里的checkLeader()方法的返回值和常规逻辑是反着的，存在leader时，返回false；不存在leader时，返回true
+* 其他情况，返回candidate
+
+这里的调用方在decideVote，一般情况下，是将recognizeCandidate的返回值作为实参，传递给decideVote()方法，而decideVote()方法，首先就是对RaftPeer candidate是否null进行判断，当candidate为null时，该RaftPeer拒绝投票
+
 ### 4. decideVote
 
 ```java
@@ -210,6 +234,29 @@ boolean decideVote(RaftPeer candidate, TermIndex candidateLastEntry) {
     } else {
         return reject("our priority " + priority + " > candidate's priority " + candidate.getPriority());
     }
+}
+```
+
+相当于在decideVote()方法之前，对于term的检查已经完毕，这一步是用来比较candidate发过来的RPC中携带的logEntry和该RaftServer中的logEntry谁的log更加的update-to-date。这部分的逻辑在ServerState.compareLog()方法中
+
+```java
+static int compareLog(TermIndex lastEntry, TermIndex candidateLastEntry) {
+    if (lastEntry == null) {
+        // If the lastEntry of candidate is null, the proto will transfer an empty TermIndexProto,
+        // then term and index of candidateLastEntry will both be 0.
+        // Besides, candidateLastEntry comes from proto now, it never be null.
+        // But we still check candidateLastEntry == null here,
+        // to avoid candidateLastEntry did not come from proto in future.
+        if (candidateLastEntry == null ||
+            (candidateLastEntry.getTerm() == 0 && candidateLastEntry.getIndex() == 0)) {
+            return 0;
+        }
+        return -1;
+    } else if (candidateLastEntry == null) {
+        return 1;
+    }
+
+    return lastEntry.compareTo(candidateLastEntry);
 }
 ```
 

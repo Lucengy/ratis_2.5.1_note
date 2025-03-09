@@ -32,7 +32,7 @@ public CounterServer(RaftPeer peer, File storageDir) throws IOException {
 
 public void start() throws IOException {
     server.start();
-  }
+}
 ```
 
 首先看一下RaftServer类是怎么构造的，以及具体的实现类是什么。以下代码来自RaftServer接口
@@ -140,6 +140,32 @@ private void startImpl() throws IOException {
 这里会调用RaftServerImpl.start()方法，注意这里是RaftServerImpl对象的集合，同时调用getServerRpc().start()方法。这里先忽略掉getDataStreamServerRpc().start()方法，这是Ratis-Streaming相关的
 
 ### 1. RaftServerImpl.start()方法
+
+```java
+boolean start() throws IOException {
+    if (!lifeCycle.compareAndTransition(NEW, STARTING)) {
+        return false;
+    }
+    state.initialize(stateMachine);
+
+    final RaftConfigurationImpl conf = getRaftConf();
+    if (conf != null && conf.containsInBothConfs(getId())) {
+        LOG.info("{}: start as a follower, conf={}", getMemberId(), conf);
+        startAsPeer(RaftPeerRole.FOLLOWER);
+    } else if (conf != null && conf.containsInConf(getId(), RaftPeerRole.LISTENER)) {
+        LOG.info("{}: start as a listener, conf={}", getMemberId(), conf);
+        startAsPeer(RaftPeerRole.LISTENER);
+    } else {
+        LOG.info("{}: start with initializing state, conf={}", getMemberId(), conf);
+        startInitializing();
+    }
+
+    registerMBean(getId(), getMemberId().getGroupId(), jmxAdapter, jmxAdapter);
+    state.start();
+    startComplete.compareAndSet(false, true);
+    return true;
+}
+```
 
 
 
