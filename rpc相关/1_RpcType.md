@@ -271,6 +271,69 @@ public interface RaftServerRpc extends RaftServerProtocol, RpcType.Get, RaftPeer
 
 跟RaftClientRpc类似，也有一个抽象类RaftServerRpcWithProxy，这里的PROXY和PROXIES其实跟RaftClientRpc是一样的逻辑。这里的proxyCreater是一个Function，跟PeerProxyMap中的createPrxoy没有关系，不要误会了！
 
+这里有一点容易产生误解，实例变量proxiesSupplier，其类型为Supplier\<PROXIES>，关于Supplier函数式接口定义如下：
+
+```java
+public interface Supplier<T> {
+    T get();
+}
+```
+
+而在构造器中对proxiesSupplier进行赋值，那么实际上是
+
+```java
+public class lambdaB implements Supplier<PROXIES> {
+     @Override
+     public PROXIES get() {
+         return proxyCreater.apply(id);
+     }
+}
+```
+
+那么问题来了，在每次调用getProxies()方法时，实际上都是在调用proxyCreater.apply(id)，而在GrpcService中，proxyCreater传递的为PeerProxyMap\<PROXY>的构造器，那么意味着，每次get得到的PeerProxyMap对象都是新构造的，这显然是不合理的，问题的关键就在JavaUtils.memoze()方法中
+
+```java
+static <T> MemoizedSupplier<T> memoize(Supplier<T> initializer) {
+    return MemoizedSupplier.valueOf(initializer);
+}
+```
+
+调用的是MemoizedSupplier的静态方法，构造MemoizedSupplier方法
+
+```java
+public final class MemoizedSupplier<T> implements Supplier<T> {
+    public static <T> MemoizedSupplier<T> valueOf(Supplier<T> supplier) {
+        return supplier instanceof MemoizedSupplier ?
+            (MemoizedSupplier<T>) supplier : new MemoizedSupplier<>(supplier);
+    }
+    
+    private final Supplier<T> initializer;
+    private volatile T value = null;
+    
+    private MemoizedSupplier(Supplier<T> initializer) {
+        Objects.requireNonNull(initializer, "initializer == null");
+        this.initializer = initializer;
+    }
+    
+    @Override
+    public T get() {
+        T v = value;
+        if (v == null) {
+            synchronized (this) {
+                v = value;
+                if (v == null) {
+                    v = value = Objects.requireNonNull(initializer.get(),
+                                                       "initializer.get() returns null");
+                }
+            }
+        }
+        return v;
+    }
+}
+```
+
+MemonizedSupplier中重写了Supplier的get方法，这里使用了单例模式，确保了value的唯一值
+
 ```java
 public abstract class RaftServerRpcWithProxy<PROXY extends Closeable, PROXIES extends PeerProxyMap<PROXY>> implements RaftServerRpc {
       private final Supplier<RaftPeerId> idSupplier;
@@ -328,7 +391,22 @@ public abstract class RaftServerRpcWithProxy<PROXY extends Closeable, PROXIES ex
 }
 ```
 
-RaftServerRpcWithProxy的子类为GrpcService，主要关注其构造器中调用super()时传递的proxyCreater对象
+RaftServerRpcWithProxy的子类为GrpcService，主要关注其class定义以及构造器中调用super()时传递的proxyCreater对象，可以看到，这里的PROXY为GrpcServerProtocolClient，PROXIES为PeerProxyMap\<GrpcServerProtocolClient>，
+
+```java
+public final class GrpcService extends RaftServerRpcWithProxy<GrpcServerProtocolClient,
+    PeerProxyMap<GrpcServerProtocolClient>>
+```
+
+以及再调用super()方法时，传递的proxyCreater，用来构造Supplier\<PeerProxyMap\<GrpcServerProtocolClient>> proxiesSupplier对象， 即
+
+```
+id -> new PeerProxyMap<>(id.toString(),
+    p -> new GrpcServerProtocolClient(p, flowControlWindow.getSizeInt(),
+        requestTimeoutDuration, serverTlsConfig, useSeparateHBChannel))
+```
+
+而PeerProxyMap的构造器中，第二个参数是用来构造GrpcServerProtocolClient对象的。
 
 ```java
 private GrpcService(RaftServer raftServer, Supplier<RaftPeerId> idSupplier,

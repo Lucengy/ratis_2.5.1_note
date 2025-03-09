@@ -325,3 +325,8 @@ static class StreamObservers {
 ```
 
 可以看到，核心点在StreamObservers的构造器中，通过GrpcServiceProtocolClient.appendEntries()方法，实际上是构造了对应的Stub对象
+
+所以，再次总结，RaftServerProxy对象有两方面的工作
+
+1. 持有一个总的Rpc对象，即GrpcService对象，负责Grpc的server端工作
+2. 持有一个RaftServerImpl集合，每个RaftServerImpl持有一（有问题啊，client应该发给GrpcService对象哈，也要复用的，要不然还是会有Socket风暴
