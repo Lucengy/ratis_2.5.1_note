@@ -75,7 +75,7 @@ LeaderElection实现了Runnable接口，持有一个Deamon对象，那么在初�
 this.daemon = new Daemon(this);
 ```
 
-那么入口方法则为run()方法
+那么入口方法则为run()方法，run()方法并没有使用循环，煦暖提在askForVotes()方法中，使用死循环一致投票，这里只会对结果返回true/false
 
 ```java
   @Override
@@ -115,6 +115,109 @@ this.daemon = new Daemon(this);
     }
   }
 ```
+
+首先看submitRequests()方法，该方法是将requestVote请求发给其他RaftPeer，这里并不涉及自身，形参中RaftPeer列表的名字是others，该方法返回发起requestVote的投票的数量
+
+```java
+private int submitRequests(Phase phase, long electionTerm, TermIndex lastEntry,
+      Collection<RaftPeer> others, Executor voteExecutor) {
+    int submitted = 0;
+    for (final RaftPeer peer : others) {
+        final RequestVoteRequestProto r = ServerProtoUtils.toRequestVoteRequestProto(
+            server.getMemberId(), peer.getId(), electionTerm, lastEntry, phase == Phase.PRE_VOTE);
+        voteExecutor.submit(() -> server.getServerRpc().requestVote(r));
+        submitted++;
+    }
+    return submitted;
+}
+```
+
+waitForResult方法比较长
+
+```java
+private ResultAndTerm waitForResults(Phase phase, long electionTerm, int submitted,
+      RaftConfigurationImpl conf, Executor voteExecutor) throws InterruptedException {
+    final Timestamp timeout = Timestamp.currentTime().addTime(server.getRandomElectionTimeout());
+    final Map<RaftPeerId, RequestVoteReplyProto> responses = new HashMap<>();
+    final List<Exception> exceptions = new ArrayList<>();
+    int waitForNum = submitted;
+    Collection<RaftPeerId> votedPeers = new ArrayList<>();
+    Collection<RaftPeerId> rejectedPeers = new ArrayList<>();
+    Set<RaftPeerId> higherPriorityPeers = getHigherPriorityPeers(conf);
+
+    while (waitForNum > 0 && shouldRun(electionTerm)) {
+        final TimeDuration waitTime = timeout.elapsedTime().apply(n -> -n);
+        if (waitTime.isNonPositive()) {
+            if (conf.hasMajority(votedPeers, server.getId())) {
+                // if some higher priority peer did not response when timeout, but candidate get majority, candidate pass vote
+                return logAndReturn(phase, Result.PASSED, responses, exceptions);
+            } else {
+                return logAndReturn(phase, Result.TIMEOUT, responses, exceptions);
+            }
+        }
+
+        try {
+            final Future<RequestVoteReplyProto> future = voteExecutor.poll(waitTime);
+            if (future == null) {
+                continue; // poll timeout, continue to return Result.TIMEOUT
+            }
+
+            final RequestVoteReplyProto r = future.get();
+            final RaftPeerId replierId = RaftPeerId.valueOf(r.getServerReply().getReplyId());
+            final RequestVoteReplyProto previous = responses.putIfAbsent(replierId, r);
+            if (previous != null) {
+                if (LOG.isWarnEnabled()) {
+                    LOG.warn("{} received duplicated replies from {}, the 2nd reply is ignored: 1st={}, 2nd={}",
+                             this, replierId,
+                             ServerStringUtils.toRequestVoteReplyString(previous),
+                             ServerStringUtils.toRequestVoteReplyString(r));
+                }
+                continue;
+            }
+            if (r.getShouldShutdown()) {
+                return logAndReturn(phase, Result.SHUTDOWN, responses, exceptions);
+            }
+            if (r.getTerm() > electionTerm) {
+                return logAndReturn(phase, Result.DISCOVERED_A_NEW_TERM, responses, exceptions, r.getTerm());
+            }
+
+            // If any peer with higher priority rejects vote, candidate can not pass vote
+            if (!r.getServerReply().getSuccess() && higherPriorityPeers.contains(replierId)) {
+                return logAndReturn(phase, Result.REJECTED, responses, exceptions);
+            }
+
+            // remove higher priority peer, so that we check higherPriorityPeers empty to make sure
+            // all higher priority peers have replied
+            higherPriorityPeers.remove(replierId);
+
+            if (r.getServerReply().getSuccess()) {
+                votedPeers.add(replierId);
+                // If majority and all peers with higher priority have voted, candidate pass vote
+                if (higherPriorityPeers.size() == 0 && conf.hasMajority(votedPeers, server.getId())) {
+                    return logAndReturn(phase, Result.PASSED, responses, exceptions);
+                }
+            } else {
+                rejectedPeers.add(replierId);
+                if (conf.majorityRejectVotes(rejectedPeers)) {
+                    return logAndReturn(phase, Result.REJECTED, responses, exceptions);
+                }
+            }
+        } catch(ExecutionException e) {
+            LogUtils.infoOrTrace(LOG, () -> this + " got exception when requesting votes", e);
+            exceptions.add(e);
+        }
+        waitForNum--;
+    }
+    // received all the responses
+    if (conf.hasMajority(votedPeers, server.getId())) {
+        return logAndReturn(phase, Result.PASSED, responses, exceptions);
+    } else {
+        return logAndReturn(phase, Result.REJECTED, responses, exceptions);
+    }
+}
+```
+
+
 
 首先涉及到的方法是askForVotes()方法
 
@@ -163,4 +266,3 @@ private boolean askForVotes(Phase phase) throws InterruptedException, IOExceptio
     return false;
 }
 ```
-

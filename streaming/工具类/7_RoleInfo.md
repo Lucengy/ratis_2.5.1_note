@@ -19,9 +19,14 @@ private void setRole(RaftPeerRole newRole, Object reason) {
     //LOG
     this.role.transitionRole(newRole);
 }
+
+void transitionRole(RaftPeerRole newRole) {
+    this.role = newRole;
+    this.transitionTime.set(Timestamp.currentTime());
+}
 ```
 
-有关setRole方法，首先是startAwsPeer方法，根据JavaDoc，这里是当this peer属于current configuration时，进行调用的
+有关setRole方法，首先是startAwsPeer方法，根据JavaDoc，这里是当this peer属于current configuration时进行调用的
 
 ```java
 private void startAsPeer(RaftPeerRole newRole) {

@@ -45,10 +45,6 @@ message RequestVoteRequestProto {
 }
 ```
 
-
-
-
-
 server端处理requestVote的流程在RaftServerImpl中
 
 ```java

@@ -278,3 +278,58 @@ private MemoizedSupplier<List<CompletableFuture<Message>>> applyLog() throws Raf
 在takeSnapshot的最后，需要调用raftLog.purge()方法，清除多余的log entires，purgeIndex的相关内容在前言中已经详细说明，这里不再赘述
 
 ## 3. SnapshotManager
+
+
+
+## 4. SnapshotManagementRequest
+
+老实讲，并没有感觉到这个类存在的意义
+
+```java
+public final class SnapshotManagementRequest extends RaftClientRequest {
+
+    public abstract static class Op {
+
+    }
+    public static class Create extends Op {
+
+        @Override
+        public String toString() {
+            return JavaUtils.getClassSimpleName(getClass()) + ":" ;
+        }
+
+    }
+
+    public static SnapshotManagementRequest newCreate(ClientId clientId,
+                                                      RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs) {
+        return new SnapshotManagementRequest(clientId,
+                                             serverId, groupId, callId, timeoutMs,new SnapshotManagementRequest.Create());
+    }
+
+    private final Op op;
+
+    public SnapshotManagementRequest(ClientId clientId,
+                                     RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs, Op op) {
+        super(clientId, serverId, groupId, callId, readRequestType(), timeoutMs);
+        this.op = op;
+    }
+
+    public SnapshotManagementRequest.Create getCreate() {
+        return op instanceof Create ? (Create)op: null;
+    }
+
+    @Override
+    public String toString() {
+        return super.toString() + ", " + op;
+    }
+}
+```
+
+## 5. SnapshotManagementReqeustHandler
+
+存在两个内部类PendingRequest和PendingRequestReference，老实讲，并没有看出来这两个类存在的意义
+
+```java
+
+```
+

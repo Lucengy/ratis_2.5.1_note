@@ -268,3 +268,63 @@ public interface RaftStorage extends Closeable {
 }
 ```
 
+## 8. RaftServerProxy.initGroup方法
+
+该方法中会初始化Raft存储目录。代码如下
+
+```java
+void initGroups(RaftGroup group, StartupOption option) {
+    final Optional<RaftGroup> raftGroup = Optional.ofNullable(group);
+    final RaftGroupId raftGroupId = raftGroup.map(RaftGroup::getGroupId).orElse(null);
+    final Predicate<RaftGroupId> shouldAdd = gid -> gid != null && !gid.equals(raftGroupId);
+
+    ConcurrentUtils.parallelForEachAsync(RaftServerConfigKeys.storageDir(properties),
+                                         dir -> Optional.ofNullable(dir.listFiles())
+                                         .map(Arrays::stream).orElse(Stream.empty())
+                                         .filter(File::isDirectory)
+                                         .forEach(sub -> initGroupDir(sub, shouldAdd)),
+                                         executor).join();
+    raftGroup.ifPresent(g -> addGroup(g, option));
+}
+```
+
+在forEach(sub -> initGroupDir(sub, shouldAdd))中会调用initGroupDir()方法
+
+```java
+private void initGroupDir(File sub, Predicate<RaftGroupId> shouldAdd) {
+    try {
+        LOG.info("{}: found a subdirectory {}", getId(), sub);
+        RaftGroupId groupId = null;
+        try {
+            groupId = RaftGroupId.valueOf(UUID.fromString(sub.getName()));
+        } catch (Exception e) {
+            LOG.info("{}: The directory {} is not a group directory;" +
+                     " ignoring it. ", getId(), sub.getAbsolutePath());
+        }
+        if (shouldAdd.test(groupId)) {
+            addGroup(RaftGroup.valueOf(groupId), StartupOption.RECOVER);
+        }
+    } catch (Exception e) {
+        LOG.warn(getId() + ": Failed to initialize the group directory "
+                 + sub.getAbsolutePath() + ".  Ignoring it", e);
+    }
+}
+```
+
+但是并不清楚，sub对应的路径是什么，于是在initGroupDir加入了一条sout
+
+![1741563527641](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1741563527641.png)
+
+重新编译代码，启动server
+
+```java
+mvn clean install -Dmaven.test.skip=true
+```
+
+![1741563592591](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1741563592591.png)
+
+结合ratis的存储路径结构
+
+![1741563635891](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1741563635891.png)
+
+那么这个uuid类似的文件夹名就是这里的sub实参，同样也是groupId值
