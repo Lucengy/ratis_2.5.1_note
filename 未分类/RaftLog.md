@@ -51,7 +51,7 @@ message LogEntryProto {
 针对写请求的logEntry，其类型应该是StateMachineLogEntryProto，这里包含RaftLog的内容，同时，做了StateMachine data和RaftLog data的分离，那么StateMachineLogEntryProto的定义为
 
 ```protobuf
-essage StateMachineLogEntryProto {
+Message StateMachineLogEntryProto {
   // TODO: This is not super efficient if the SM itself uses PB to serialize its own data for a
   /** RaftLog entry data */
   bytes logData = 1;
