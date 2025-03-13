@@ -341,7 +341,10 @@ private void updateCommit() {
 }
 ```
 
-这里调用了getMajorityMin方法和updateCommit(long, long)方法，首先看getMajorityMin()方法
+这里调用了getMajorityMin方法和updateCommit(long, long)方法，首先看getMajorityMin()方法。这里有四个return语句，注意有返回null的情况，即Optional.empty()
+
+* 当followers为空，且不包含本身的情况，返回null
+* 当conf处于transitional状态，oldConf为且不包含自身的情况，返回null
 
 ```java
 private Optional<MinMajorityMax> getMajorityMin(ToLongFunction<FollowerInfo> followerIndex,

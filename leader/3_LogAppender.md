@@ -520,7 +520,7 @@ static class AppendEntriesRequest {
 }
 ```
 
-### 2. RequestMap
+### 2. RequestsMap
 
 封装了两个map，分别是logMap和heartbeatMap，其中key为callID，value为AppendEntiresRequest
 
@@ -579,3 +579,60 @@ static class RequestMap {
 
 这里需要打一个问号，第二种情况，当返回值为NOT_LEADER时，这个是告诉本leader，在下已经退位的意思嘛？
 
+```java
+private class AppendLogResponseHandler implements StreamObserver<AppendEntriesReplyProto> {
+    public void onNext(AppendEntriesReplyProto reply) {
+        //首先从缓存的发送列表移除这个request。这里remove()的实参是一个reply对象
+        //这是因为remove方法只需要知道callId即可，request和reply中都携带着这部分信息
+        AppendEntriesRequest reqeust = pendingRequests.remove(reply);
+        if(request != null) {
+            request.stopRequestTimer();
+        }
+        
+        //LOG
+        
+        try {
+            onNextImpl(reply);
+        } catch(Exception i) {
+            //LOG
+        }
+    }
+    
+    private void onNextImpl(AppendEntriesReplyProto reply) {
+        // update the last rpc time
+        getFollower().updateLastRpcResponseTime();
+
+        if (!firstResponseReceived) {
+            firstResponseReceived = true;
+        }
+
+        switch (reply.getResult()) {
+            case SUCCESS:
+                grpcServerMetrics.onRequestSuccess(getFollowerId().toString(), reply.getIsHearbeat());
+                //1. 通知leader
+                getLeaderState().onFollowerCommitIndex(getFollower(), reply.getFollowerCommit());
+                //2. 更新leader中的followerInfo信息
+                if (getFollower().updateMatchIndex(reply.getMatchIndex())) {
+                    getLeaderState().onFollowerSuccessAppendEntries(getFollower());
+                }
+                break;
+            case NOT_LEADER:
+                grpcServerMetrics.onRequestNotLeader(getFollowerId().toString());
+                if (onFollowerTerm(reply.getTerm())) {
+                    return;
+                }
+                break;
+            case INCONSISTENCY:
+                grpcServerMetrics.onRequestInconsistency(getFollowerId().toString());
+                updateNextIndex(reply.getNextIndex());
+                break;
+            default:
+                throw new IllegalStateException("Unexpected reply result: " + reply.getResult());
+        }
+        getLeaderState().onAppendEntriesReply(getFollower(), reply);
+        notifyLogAppender();
+    }
+}
+```
+
+针对1，在reply返回成功时，需要通知leader
