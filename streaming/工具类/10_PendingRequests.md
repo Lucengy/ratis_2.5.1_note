@@ -52,3 +52,55 @@ static class RequestLimits extends ResourceSemaphore.Group {
 }
 ```
 
+## 4. 静态内部类RequestMap
+
+```java
+private static class RequestMap {
+    private final Object name;
+    
+    private final ConcurrentMap<Long, PendingRequest> map = new ConcurrentHashMap<>();
+    
+    private final Map<Permit, Permit> permits = new HashMap<>();
+    
+    private final RequestLimits resource;
+    
+    private final AtomicLong requestSize = new AtomicLong();
+    
+    RequestMap(Object name, int elementLimit, int megabyteLimit) {
+        this.name = name;
+        this.resource = new ResourceLimits(elementLimit, megabyteLimit);
+    }
+    
+    Permit tryAcquire(Message message) {
+        final int messageSize = Message.getSize(message);
+        final int messageSizeMb = roundUpMb(messageSize);
+        final ResourceSemaphore.ResourceAcquireState acquired = resource.tryAcquire(messageSizeMb);
+        
+        if(acquired == ResourceSemaphore.ResourceAcquireStatus.FAILED_IN_ELEMENT_LIMIT) {
+            return null;
+        } else if (acquired == ResourceSemaphore.ResourceAcquireState.FAILED_IN_BYTE_SIZE_LIMIT) {
+            return null;
+        }
+        
+        final long oldSize = requestSize.getAndAdd(messageSize);
+        final long newSize = oldSize + messageSize;
+        final int diffMb = roundUpMb(newSize) - roundUpMb(oldSize);
+        if(messageSizeMb > diffMb) {
+            resource.releaseExtraMb(messageSizeMb - diffMb);
+        }
+        
+        return putPermit();
+    }
+    
+    private synchronized Permit putPermit() {
+        if(resource.isClosed()) {
+            return null;
+        }
+        
+        final Permit permit = new Permit();
+        permits.put(permit, permit);
+        return permit;
+    }
+}
+```
+

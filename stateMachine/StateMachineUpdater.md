@@ -59,7 +59,7 @@ updater.start()即调用StateMachineUpdater.run()方法。
   }
 ```
 
-接下来就是applyLog()的逻辑
+接下来就是applyLog()的逻辑，这里注意applyLog的返回值，是一个List<CompletableFuture\<Message>>对象，这是因为RaftServerImpl.applyLogToStateMahcine()方法返回的是一个CompletableFuture\<Message>对象，而applyLog方法针对的是appliedIndex到committedIndex之间的logEntries，所以这里返回一个list
 
 ```java
 private MemoizedSupplier<List<CompletableFuture<Message>>> applyLog() throws RaftLogIOException {
@@ -89,6 +89,37 @@ private MemoizedSupplier<List<CompletableFuture<Message>>> applyLog() throws Raf
         }
     }
     return futures;
+}
+```
+
+因为applyLog方法的返回值，实际上是一个List\<CompletableFuture\<Message>>对象，这里将这个返回值传递给checkAndTakeSnapshot方法，由其来决定是否触发takeSnapshot动作
+
+```java
+private void checkAndTakeSnapshot(MemoizedSupplier<List<CompletableFuture<Message>>> future) throws ExecutionException, InterruptedException {
+    if(shouldTakeSnapshot()) {
+        if(futures.isInitialized()) {
+            JavaUtils.allOf(futures.get()).get();
+        }
+        
+        takeSnapshot();
+    } 
+}
+
+private boolean shouldTakeSnapshot() {
+    //这个条件是后加的，先不看
+    if(state == State.RUNNING && server.getSnapshotRequestHandler().shouldTriggerSnapshot(())) {
+        return true;
+    }
+       
+    if(autoSnapshotThreshold == null) {
+        return false;
+    } else if(shouldStop()) {
+        return getLastAppliedIndex() - snapshotIndex.get() > 0;
+    }   
+    
+    return state == State.RUNNING && 
+        getStateMachineLastAppliedIndex() - snapshotIndex.get() >= autoSnapshotThreshold;
+       
 }
 ```
 

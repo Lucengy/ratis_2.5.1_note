@@ -279,6 +279,53 @@ private MemoizedSupplier<List<CompletableFuture<Message>>> applyLog() throws Raf
 
 ## 3. SnapshotManager
 
+只有一个RaftPeerId selfId的实例变量，并且所有变量都使用final进行修饰。除去selfId，其他变量都有默认值，所以构造器支队selfId进行了赋值
+
+```java
+public class SnapshotManager {
+    private static final String CORRUPT = ".corrupt";
+    private static final String TMP = ".tmp";
+    private final RaftPeerId selfId;
+    private final Supplier<MessageDigest> digester = JavaUtils.memoize(MD5Hash::getDigester);
+    
+    SnapshotManager(RaftPeerId selfId) {
+        this.selfId = selfId;
+    }
+}
+```
+
+除去构造器外，只有两个大方法，分别为isntallSnasphot()方法和rename方法
+
+先看protobuf中的定义
+
+```protobuf
+message InstallSnapshotRequestProto {
+  message SnapshotChunkProto {
+    string requestId = 1; // an identifier for chunked-requests.
+    uint32 requestIndex = 2; // the index for this request chunk. Starts from 0.
+    RaftConfigurationProto raftConfiguration = 3;
+    TermIndexProto termIndex = 4;
+    repeated FileChunkProto fileChunks = 5;
+    uint64 totalSize = 6;
+    bool done = 7; // whether this is the final chunk for the same req.
+  }
+
+  message NotificationProto {
+    TermIndexProto firstAvailableTermIndex = 1; // first available log index to notify Follower to install snapshot.
+  }
+
+  RaftRpcRequestProto serverRequest = 1;
+  uint64 leaderTerm = 2;
+
+  oneof InstallSnapshotRequestBody {
+    SnapshotChunkProto snapshotChunk = 3;
+    NotificationProto notification = 4;
+  }
+
+  LogEntryProto lastRaftConfigurationLogEntryProto = 5;
+}
+```
+
 
 
 ## 4. SnapshotManagementRequest
@@ -291,25 +338,23 @@ public final class SnapshotManagementRequest extends RaftClientRequest {
     public abstract static class Op {
 
     }
+    
     public static class Create extends Op {
-
         @Override
         public String toString() {
             return JavaUtils.getClassSimpleName(getClass()) + ":" ;
         }
-
     }
 
     public static SnapshotManagementRequest newCreate(ClientId clientId,
-                                                      RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs) {
-        return new SnapshotManagementRequest(clientId,
-                                             serverId, groupId, callId, timeoutMs,new SnapshotManagementRequest.Create());
+            RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs) {
+        return new SnapshotManagementRequest(clientId, serverId, groupId, callId, timeoutMs, new 				SnapshotManagementRequest.Create());
     }
 
     private final Op op;
-
+    
     public SnapshotManagementRequest(ClientId clientId,
-                                     RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs, Op op) {
+      RaftPeerId serverId, RaftGroupId groupId, long callId, long timeoutMs, Op op) {
         super(clientId, serverId, groupId, callId, readRequestType(), timeoutMs);
         this.op = op;
     }
@@ -325,11 +370,5 @@ public final class SnapshotManagementRequest extends RaftClientRequest {
 }
 ```
 
-## 5. SnapshotManagementReqeustHandler
 
-存在两个内部类PendingRequest和PendingRequestReference，老实讲，并没有看出来这两个类存在的意义
-
-```java
-
-```
 

@@ -35,10 +35,16 @@ rpc调用为installSnapshot()方法，该rpc为双向stream方法，故返回值
   }
 ```
 
-该方法的调用方在GrpcLogAppender.installSnapshot(SnapshotInfo)方法中，输入流的StreamObserver对象为InstallSnapshotResponseHandler，该对象继承自StreamObserver\<InstallSnapshotReplyProto>
+该方法的调用方在GrpcLogAppender.installSnapshot(SnapshotInfo)方法中，输入流的StreamObserver对象为InstallSnapshotResponseHandler，该对象继承自StreamObserver\<InstallSnapshotReplyProto>。
 
-```java
+罪恶的根源为Ratis-498，一开始installSnapshot的涉及为：出现怠速的follower，当leader的第一条raftLog大于follower最后一条raftLog时，leader应该发送一个installSnapshotRequest到follower，这也是raft原文描述的场景
 
+好死不死，这里要加一个场景，就是将stateMachine的installSnapshot从ratis server中解耦出来。那么出现上述问题时，leader只是给follower发送一个notify的rpc，而不是由logAppender将installSnapshot发送给follower，follower再收到notify  rpc时，notify自己的stateMachine，告知stateMachine需要从leader搞一个snapshot过来
+
+```
+When a lagging Follower wants to catch up with the Leader, and the Leader only has logs with start index greater than the Followers's last log index, then the leader sends an InstallSnapshotRequest to the the Follower. 
+
+The aim of this Jira is to allow State Machine to decouple snapshot installation from the Ratis server. When Leader does not have the logs to get the Follower up to speed, it should notify the Follower to install a snapshot (if install snapshot through Log Appender is disabled). The Follower in turn notifies its state machine that a snapshot is required to catch up with the leader.
 ```
 
 ![1739070551400](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1739070551400.png)

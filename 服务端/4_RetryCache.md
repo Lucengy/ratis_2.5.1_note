@@ -17,7 +17,7 @@ interface Statistics {
     long hitCount(); //返回缓存命中次数
     double hitRate(); //返回缓存命中百分比
     long missCount();
-    doulbe missRate();
+    double missRate();
 }
 ```
 
@@ -29,6 +29,31 @@ interface Retrycache extends Closeable {
     Statistics getStatistics();
 }
 ```
+
+这里还涉及到ClientInvocationId，根据JavaDoc描述
+
+```
+The id of a client invocation. A client invocation may be an RPC or a stream.
+客户端调用的id。客户端调用可以是RPC或数据流。
+
+This is a value-based class
+```
+
+
+
+```java
+public final class ClientInvocationId {
+    private final ClientId clientId;
+    private final long longId;
+    
+    private CLientInvocationId(ClientId clientId, long longId) {
+        this.clientId = clientId;
+        this.longId = longId;
+    }
+}
+```
+
+
 
 ## 2. RetryCacheImpl实现类
 
@@ -138,33 +163,112 @@ CacheQueryResult queryCache(ClientInvocationId key) {
     final CacheEntry newEntry = new CacheEntry(key);
     final CacheEntry cacheEntry;
     try {
-      cacheEntry = cache.get(key, () -> newEntry);
+        cacheEntry = cache.get(key, () -> newEntry);
     } catch (ExecutionException e) {
-      throw new IllegalStateException(e);
+        throw new IllegalStateException(e);
     }
 
     if (cacheEntry == newEntry) {
-      // this is the entry we just newly created
-      return new CacheQueryResult(cacheEntry, false);
+        // this is the entry we just newly created
+        //这里是上面cache.get()时putIfAbsent情况下put进去的，证明不是retry
+        return new CacheQueryResult(cacheEntry, false);
     } else if (!cacheEntry.isDone() || !cacheEntry.isFailed()){
-      // the previous attempt is either pending or successful
-      return new CacheQueryResult(cacheEntry, true);
+        // the previous attempt is either pending or successful
+        //要么没有完成，要么没有失败
+        return new CacheQueryResult(cacheEntry, true);
     }
 
+    //完成了，且失败了
     // the previous attempt failed, replace it with a new one.
     synchronized (this) {
-      // need to recheck, since there may be other retry attempts being
-      // processed at the same time. The recheck+replacement should be protected
-      // by lock.
-      final CacheEntry currentEntry = cache.getIfPresent(key);
-      if (currentEntry == cacheEntry || currentEntry == null) {
-        // if the failed entry has not got replaced by another retry, or the
-        // failed entry got invalidated, we add a new cache entry
-        return new CacheQueryResult(refreshEntry(newEntry), false);
-      } else {
-        return new CacheQueryResult(currentEntry, true);
-      }
+        // need to recheck, since there may be other retry attempts being
+        // processed at the same time. The recheck+replacement should be protected
+        // by lock.
+        final CacheEntry currentEntry = cache.getIfPresent(key);
+        if (currentEntry == cacheEntry || currentEntry == null) {
+            // if the failed entry has not got replaced by another retry, or the
+            // failed entry got invalidated, we add a new cache entry
+            return new CacheQueryResult(refreshEntry(newEntry), false);
+        } else {
+            return new CacheQueryResult(currentEntry, true);
+        }
     }
-  }
+}
+
+CacheEntry refreshEntry(CacheEntry newEntry) {
+    cache.put(newEntry.getKey(), newEntry);
+    return newEntry;
+}
 ```
+
+queryCache()方法的调用方在RaftServerImpl.submitClientRequestAsync()方法中
+
+```java
+@Override
+public CompletableFuture<RaftClientReply> submitClientRequestAsync(
+    RaftClientRequest request) throws IOException {
+    assertLifeCycleState(LifeCycle.States.RUNNING);
+    LOG.debug("{}: receive client request({})", getMemberId(), request);
+    final Optional<Timer> timer = Optional.ofNullable(raftServerMetrics.getClientRequestTimer(request.getType()));
+
+    final CompletableFuture<RaftClientReply> replyFuture;
+
+    if (request.is(TypeCase.STALEREAD)) {
+        replyFuture = staleReadAsync(request);
+    } else {
+        // first check the server's leader state
+        CompletableFuture<RaftClientReply> reply = checkLeaderState(request, null,
+                                                                    !request.is(TypeCase.READ) && !request.is(TypeCase.WATCH));
+        if (reply != null) {
+            return reply;
+        }
+
+        // let the state machine handle read-only request from client
+        RaftClientRequest.Type type = request.getType();
+        if (type.is(TypeCase.MESSAGESTREAM)) {
+            if (type.getMessageStream().getEndOfRequest()) {
+                final CompletableFuture<RaftClientRequest> f = streamEndOfRequestAsync(request);
+                if (f.isCompletedExceptionally()) {
+                    return f.thenApply(r -> null);
+                }
+                request = f.join();
+                type = request.getType();
+            }
+        }
+
+        if (type.is(TypeCase.READ)) {
+            // TODO: We might not be the leader anymore by the time this completes.
+            // See the RAFT paper section 8 (last part)
+            replyFuture = processQueryFuture(stateMachine.query(request.getMessage()), request);
+        } else if (type.is(TypeCase.WATCH)) {
+            replyFuture = watchAsync(request);
+        } else if (type.is(TypeCase.MESSAGESTREAM)) {
+            replyFuture = streamAsync(request);
+        } else {
+            // query the retry cache
+            final RetryCacheImpl.CacheQueryResult queryResult = retryCache.queryCache(ClientInvocationId.valueOf(request));
+            final CacheEntry cacheEntry = queryResult.getEntry();
+            if (queryResult.isRetry()) {
+                // if the previous attempt is still pending or it succeeded, return its
+                // future
+                replyFuture = cacheEntry.getReplyFuture();
+            } else {
+                // TODO: this client request will not be added to pending requests until
+                // later which means that any failure in between will leave partial state in
+                // the state machine. We should call cancelTransaction() for failed requests
+                TransactionContext context = stateMachine.startTransaction(filterDataStreamRaftClientRequest(request)); //1.在这里构造了TransactionContext对象
+                if (context.getException() != null) {
+                    final StateMachineException e = new StateMachineException(getMemberId(), context.getException());
+                    final RaftClientReply exceptionReply = newExceptionReply(request, e);
+                    cacheEntry.failWithReply(exceptionReply);
+                    replyFuture =  CompletableFuture.completedFuture(exceptionReply);
+                } else {
+                    replyFuture = appendTransaction(request, context, cacheEntry);
+                }
+            }
+        }
+    }
+```
+
+这里就是如果query是一个重复的请求，会从RetryCacheImpl取出对应的cacheEntry，其保存了对应的CompletableFuture\<RaftClientReply>
 
