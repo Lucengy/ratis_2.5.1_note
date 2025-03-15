@@ -1,3 +1,15 @@
+## 0. 前言
+
+这里有关snapshot有三部分
+
+1. stateMachine会通过takeSnapshot动作做log的compaction，这部分的切入点为StateMachine.takeSnapshot()方法，调用方为StateMachineUpdater.run()方法，循环调用checkAndTakeSnapshot()方法
+2. leader发送installSnapshot rpc给follower
+3. leader发送notify rpc给follower
+
+逻辑上先看sateMachine.takeSnapshot方法，而后看rpc的过程
+
+
+
 ## 1. 客户端
 
 proto文件定义如下: 
@@ -47,7 +59,62 @@ When a lagging Follower wants to catch up with the Leader, and the Leader only h
 The aim of this Jira is to allow State Machine to decouple snapshot installation from the Ratis server. When Leader does not have the logs to get the Follower up to speed, it should notify the Follower to install a snapshot (if install snapshot through Log Appender is disabled). The Follower in turn notifies its state machine that a snapshot is required to catch up with the leader.
 ```
 
-![1739070551400](C:\Users\v587\AppData\Roaming\Typora\typora-user-images\1739070551400.png)
+上述两种情况是互斥的，要么是leader主动发起installSnapshotRequest，要么是leader只是发送notify rpc，由follower去拉去snapshot。这部分的逻辑在GrpcLogAppender.run()方法中有所体现。installSnapshot(SnapshotInfo)和installSnapshot(TermIndex)对应两种rpc方式，在if else中是互斥的
+
+```java
+if (installSnapshotEnabled) {
+    SnapshotInfo snapshot = shouldInstallSnapshot();
+    if (snapshot != null) {
+        installSnapshot(snapshot);
+        installSnapshotRequired = true;
+    }
+} else {
+    TermIndex installSnapshotNotificationTermIndex = shouldNotifyToInstallSnapshot();
+    if (installSnapshotNotificationTermIndex != null) {
+        installSnapshot(installSnapshotNotificationTermIndex);
+        installSnapshotRequired = true;
+    }
+}
+```
+
+紧接着，就是shouldInstallSnapshot()方法和shouldNotifyToInstallSnapshot()方法，这两个方法对应着逻辑，按着ratis498所描述的，前者跟Raft server强相关，后者是跟raft server解耦的，那么看一下这两个方法的逻辑
+
+shouldInstallSnapshot()方法是LogAppender中的default方法，根据JavaDoc，存在三种情况
+
+* leader没有任何logEntry
+* follower's next index小于leader的startIndex
+* follower刚刚启动
+
+```java
+default SnapshotInfo shouldInstallSnapshot() {
+    // we should install snapshot if the follower needs to catch up and:
+    // 1. there is no local log entry but there is snapshot
+    // 2. or the follower's next index is smaller than the log start index
+    // 3. or the follower is bootstrapping and has not installed any snapshot yet
+    final FollowerInfo follower = getFollower();
+    final boolean isFollowerBootstrapping = getLeaderState().isFollowerBootstrapping(follower);
+    final SnapshotInfo snapshot = getServer().getStateMachine().getLatestSnapshot();
+
+    if (isFollowerBootstrapping && !follower.hasAttemptedToInstallSnapshot()) {
+        if (snapshot == null) {
+            // Leader cannot send null snapshot to follower. Hence, acknowledge InstallSnapshot attempt (even though it
+            // was not attempted) so that follower can come out of staging state after appending log entries.
+            follower.setAttemptedToInstallSnapshot();
+        } else {
+            return snapshot;
+        }
+    }
+
+    final long followerNextIndex = getFollower().getNextIndex();
+    if (followerNextIndex < getRaftLog().getNextIndex()) {
+        final long logStartIndex = getRaftLog().getStartIndex();
+        if (followerNextIndex < logStartIndex || (logStartIndex == RaftLog.INVALID_LOG_INDEX && snapshot != null)) {
+            return snapshot;
+        }
+    }
+    return null;
+}
+```
 
 
 

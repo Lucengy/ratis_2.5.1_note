@@ -123,3 +123,5 @@ private boolean shouldTakeSnapshot() {
 }
 ```
 
+实际上就是查看appliedIndex距离上次的snapshotIndex是否超过了autoSnapshotThreshold这个阈值
+
