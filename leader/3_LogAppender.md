@@ -564,6 +564,8 @@ static class RequestMap {
 
 存在两个Handler对象，分别为AppendLogResponseHandler和InstallSnpashotResponseHandler对象，都继承自StreamObserver对象，用来监听RPC的响应信息
 
+#### AppendLogResponseHandler类
+
 首先看onNext方法的JavaDoc
 
 ```java
@@ -636,3 +638,51 @@ private class AppendLogResponseHandler implements StreamObserver<AppendEntriesRe
 ```
 
 针对1，在reply返回成功时，需要通知leader
+
+```java
+@Override
+public void onError(Throwable t) {
+    if (!isRunning()) {
+        LOG.info("{} is already stopped", GrpcLogAppender.this);
+        return;
+    }
+    GrpcUtil.warn(LOG, () -> this + ": Failed appendEntries", t);
+    grpcServerMetrics.onRequestRetry(); // Update try counter
+    AppendEntriesRequest request = pendingRequests.remove(GrpcUtil.getCallId(t), GrpcUtil.isHeartbeat(t));
+    resetClient(request, true);
+}
+
+@Override
+public void onCompleted() {
+    LOG.info("{}: follower responses appendEntries COMPLETED", this);
+    resetClient(null, false);
+}
+```
+
+这里的onError()方法和onCompleted()方法都调用了外部类，即GrpcLogAppender的resetClient方法
+
+```java
+private void resetClient(AppendEntriesRequest request, boolean onError) {
+    try (AutoCloseableLock writeLock = lock.writeLock(caller, LOG::trace)) {
+        getClient().resetConnectBackoff();
+        appendLogRequestObserver = null;
+        firstResponseReceived = false;
+        // clear the pending requests queue and reset the next index of follower
+        pendingRequests.clear();
+        final long nextIndex = 1 + Optional.ofNullable(request)
+            .map(AppendEntriesRequest::getPreviousLog)
+            .map(TermIndex::getIndex)
+            .orElseGet(getFollower()::getMatchIndex);
+        if (onError && getFollower().getMatchIndex() == 0 && request == null) {
+            LOG.warn("{}: Leader has not got in touch with Follower {} yet, " +
+                     "just keep nextIndex unchanged and retry.", this, getFollower());
+            return;
+        }
+        getFollower().decreaseNextIndex(nextIndex);
+    } catch (IOException ie) {
+        LOG.warn(this + ": Failed to getClient for " + getFollowerId(), ie);
+    }
+}
+```
+
+#### InstallSnpashotResponseHandler类

@@ -6,7 +6,13 @@
 2. leader发送installSnapshot rpc给follower
 3. leader发送notify rpc给follower
 
-逻辑上先看sateMachine.takeSnapshot方法，而后看rpc的过程
+逻辑上先看stateMachine.takeSnapshot方法，而后看rpc的过程
+
+这里注意SnapshotManager中的installSnapshot()方法，是用来处理rpc。更准确的说，SnapshotManager就是用来处理rpc的。SnapshotManager的commit信息描述为
+
+```
+support installSnapshot RPC
+```
 
 
 
@@ -30,7 +36,7 @@ service RaftServerProtocolService {
 }
 ```
 
-RPC客户端类为GrpcServerProtocolClient，持有同步和异步两个stub对象
+RPC客户端类为GrpcServerProtocolClient，持有同步和异步两个stub对象，此处为leader扮演客户端的角色
 
 ```java
   private final RaftServerProtocolServiceStub asyncStub;

@@ -192,6 +192,11 @@ LeaderElection.ConfAndTerm initElection(Phase phase) throws IOException {
 
 ### 7. getLastEntry方法
 
+返回的是TermIndex，并不是logEntry
+
+1. 首先找raftLog最后一条logEntry的TermIndex，如果raftLog中没有日志
+2. 查找最新一次snapshot中的TermIndex
+
 ```java
 TermIndex getLastEntry() {
     TermIndex lastEntry = getLog().getLastEntryTermIndex();
@@ -211,6 +216,127 @@ RaftLog getLog() {
         throw new IllegalStateException(getMemberId() + ": log is uninitialized.");
     }
     return log.get();
+}
+```
+
+### 8. recognizeLeader方法
+
+根据JavaDoc，是对incoming AppendEntries rpc中的leader信息进行校验，如果校验通过，返回true。
+
+这里current是本raft peer，peerLeaderId和leaderTerm是incoming AppendEntries rpc中携带的信息
+
+1. 如果leaderTerm < current，返回false
+2. 如果leaderTerm > current 或者 （leaderTerm>= current且当前没有leaderId）时，返回true
+3. 如果leaderTerm == current，那么当peerLeaderId==leaderId时，返回true，不等于leaderId时，返回false
+
+```java
+/**
+   * Check if accept the leader selfId and term from the incoming AppendEntries rpc.
+   * If accept, update the current state.
+   * @return true if the check passes
+ */
+boolean recognizeLeader(RaftPeerId peerLeaderId, long leaderTerm) {
+    final long current = currentTerm.get();
+    if (leaderTerm < current) {
+        return false;
+    } else if (leaderTerm > current || this.leaderId == null) {
+        // If the request indicates a term that is greater than the current term
+        // or no leader has been set for the current term, make sure to update
+        // leader and term later
+        return true;
+    }
+    return this.leaderId.equals(peerLeaderId);
+}
+```
+
+### 9. snapshot相关方法
+
+installSnapshot()方法为本机自行installSnapshot，并不是leader向follower/listener发送install rpc
+
+这里的步骤为
+
+1. 暂停stateMachine
+2. 调用SnapshotManager.installSnapshot()方法
+3. 调用updateInstalledSnapshotIndex()
+
+```java
+void installSnapshot(InstallSnapshotRequestProto request) throws IOException {
+    // TODO: verify that we need to install the snapshot
+    StateMachine sm = server.getStateMachine();
+    sm.pause(); // pause the SM to prepare for install snapshot
+    snapshotManager.installSnapshot(request, sm, getStorage().getStorageDir());
+    updateInstalledSnapshotIndex(TermIndex.valueOf(request.getSnapshotChunk().getTermIndex()));
+}
+```
+
+updateInstalledSnapshotIndex()方法主要做两件事
+
+1. 通知raftLog，这是告知raftLog purge掉已经takeSnapshot部分的log
+2. 更新实例变量latestInstalledSnapshot，这是用来缓存最新snapshot的TermIndex信息的
+
+getLatestSnapshot()方法用来获取最新的snapshot
+
+```java
+private SnapshotInfo getLatestSnapshot() {
+    return server.getStateMachine().getLatestSnapshot();
+}
+```
+
+getLatestInstalledSnapshotIndex()，及时获取缓存中最新snapshot的TermIndex信息
+
+```java
+long getLatestInstalledSnapshotIndex() {
+    final TermIndex ti = latestInstalledSnapshot.get();
+    return ti != null? ti.getIndex(): RaftLog.INVALID_LOG_INDEX;
+}
+```
+
+getSnapshotIndex()用来获取最新snapshot的index信息，这个信息在上述两个方法中寻找最大值
+
+```java
+/**
+   * The last index included in either the latestSnapshot or the latestInstalledSnapshot
+   * @return the last snapshot index
+ */
+long getSnapshotIndex() {
+    final SnapshotInfo s = getLatestSnapshot();
+    final long latestSnapshotIndex = s != null ? s.getIndex() : RaftLog.INVALID_LOG_INDEX;
+    return Math.max(latestSnapshotIndex, getLatestInstalledSnapshotIndex());
+}
+```
+
+### 10. getNextIndex()方法
+
+获取下一条logEntry的index信息，这里有点小疑问了，这里是寻找raftLog和snapshot中的最大值。按着正常逻辑来说，应该是先寻找raftLog，如果raftLog是空的，再从最新snapshot中获取TermIndex。
+
+```java
+long getNextIndex() {
+    final long logNextIndex = getLog().getNextIndex();
+    final long snapshotNextIndex = getLog().getSnapshotIndex() + 1;
+    return Math.max(logNextIndex, snapshotNextIndex);
+}
+```
+
+这里看RaftLog.getNextIndex()方法
+
+```java
+default long getNextIndex() {
+    final TermIndex last = getLastEntryTermIndex();
+    if (last == null) {
+        // if the log is empty, the last committed index should be consistent with
+        // the last index included in the latest snapshot.
+        return getLastCommittedIndex() + 1;
+    }
+    return last.getIndex() + 1;
+}
+```
+
+这里当last==null时，也就是当raftLog为空时的情况，那么根据这里的JavaDoc以及RaftLogBase中的实现，可以看到，当
+
+```java
+@Override
+public long getLastCommittedIndex() {
+    return commitIndex.get();
 }
 ```
 

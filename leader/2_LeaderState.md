@@ -89,7 +89,7 @@ Sates for leader only. It contains three different types of processors:
 
 ```java
 private enum BootStrapProgress {
-    NOPROGRESS< PROGRESSING, CAUGHTUP
+    NOPROGRESS, PROGRESSING, CAUGHTUP
 }
 ```
 
