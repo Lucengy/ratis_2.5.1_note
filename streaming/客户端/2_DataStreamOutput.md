@@ -77,4 +77,61 @@ public interface DataStreamOutputRpc extends DataStreamOutput {
 
 ## 3. DataStreamOutputImpl
 
-实现类，用来处理输出流的逻辑。
+实现类，用来处理输出流的逻辑。DataStreamClientImpl的内部类
+
+```java
+public final class DataStreamOutputImpl implements DataStreamOutputRpc {
+    private final RaftClinetRequest header;
+    private final CompletableFuture<DataStreamReply> headerFuture;
+    private final SlidingWindow.Client<OrderedStreamAsync.DataStreamWindowRequest, DataStreamReply> slidingWindow;
+    
+    private final CompletableFuture<RaftClientReply> raftClientReplyFuture = new CompletableFuture<>();
+    
+    private CompletableFuture<DataStreamReply> closeFuture;
+    
+    private final MemoizedSupplier<WritableByteChannel> writableByteChannelSupplier =
+         JavaUtils.memoize(() -> new WritableByteChannel(){
+             @Override
+             public int write(ByteBuffer src) throws IOException {
+                 final int remaining = src.remaining();
+                 final DataStreamReply reply = IOUtils.getFromFuture(writeAsync(src));
+                 return Math.toIntExact(reply.getBytesWritten());
+             }
+             
+             
+             @Override
+             public boolean isOpen() {
+                 return !isClosed();
+             }
+
+             @Override
+             public void close() throws IOException {
+                 if (isClosed()) {
+                     return;
+                 }
+                 IOUtils.getFromFuture(writeAsync(DataStreamPacketByteBuffer.EMPTY_BYTE_BUFFER, StandardWriteOption.CLOSE),
+                                       () -> "close(" + ClientInvocationId.valueOf(header) + ")");
+             }
+         }  
+       );
+    
+    private final long streamOffset = 0;
+    
+    //在构造器中就先发送header信息
+    private DataStreamOutputImpl(RaftClientRequest request) {
+        this.header = header;
+        this.slidingWindow = new SlidingWindow.Client<>(ClientInvocationId.valueOf(clientId, header.getCallId()));
+        final ByteBuffer buffer = ClientProtoUtils.toRaftClientRequestProtoByteBuffer(header);
+        this.headerFuture = send(Type.STREAM_HEADER, buffer, buffer.remaining());
+    }
+    
+    private CompletableFuture<DataStreamReply> send(Type type, Object data, long length, WriteOption... options) {
+        final DataStreamRequestHeader h =
+            new DataStreamRequestHeader(header.getClientId(), type, header.getCallId(), streamOffset, length, options);
+        return orderedStreamAsync.sendRequest(h, data, slidingWindow);
+    }
+}
+```
+
+
+
