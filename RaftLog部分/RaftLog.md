@@ -90,6 +90,8 @@ message StateMachineEntryProto {
 }
 ```
 
+这里要理解的是StateMachineLogEntryProto和StateMachineEntryProto的区别和联系
+
 看完这里，再来看RaftLog总的内部类EntryWithData
 
 ```java
@@ -156,6 +158,7 @@ class EntryWithDataImpl implements EntryWithData {
     private final LogEntryProto logEntry;
     private final CompletableFuture<ByteString> future;
     
+    //这里的future可以为null，意味着这里的stateMachineEntryProto可以为空
     EntryWithDataImpl(LogEntryProto logEntry, CompletableFuture<ByteString> future) {
         this.logEntry = logEntry;
         //实例::实例方法。实参全部传递给形参
@@ -181,6 +184,8 @@ class EntryWithDataImpl implements EntryWithData {
             return logEntry;
         }
         
+        //这里意味着stateMachineLogEntryProto中包含StateMachineEntryProto，即包含着
+        //stateMachineData
         try {
             entryProto = future.thenApply(data -> LogProtoUtils.addStateMachineData(data, logEntry))
                 .get(timeout.getDuration(), timeout.getUnit());
@@ -226,9 +231,18 @@ static LogEntryProto replaceStateMachineEntry(LogEntryProto proto, StateMachineE
 }
 ```
 
+抽象类RaftLogBase
+
+构造器中的形参LongSupplier方法是从ServerState的构造器中传入的
+
+```java
+final LongSupplier getSnapshotIndexFromStateMachine = () -> Optional.ofNullable(stateMachine.getLatestSnapshot())
+    .map(SnapshotInfo::getIndex)
+    .filter(i -> i >= 0)
+    .orElse(RaftLog.INVALID_LOG_INDEX);
+```
 
 
-抽象类
 
 ```java
 public abstract class RaftLogBase implements RaftLog {
@@ -240,12 +254,30 @@ public abstract class RaftLogBase implements RaftLog {
     private final RaftGroupMemberId memberId;
     private final int maxBufferSize;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
-    private final Runner runner = new Runner(this::getName);
+    private final Runner runner = new Runner(this::getName); //这里并不是Runnable
     private final OpenCloseState state;
     private final LongSupplier getSnapshotIndexFromStateMachine;
     private final TimeDuration stateMachineDataReadTimeout;
     private final long purgePreservation;
     private volatile LogEntryProto lastMetadataEntry = null;
+    
+    //先看构造器
+    protected RaftLogBase(RaftGroupMemberId memberId,
+                          LongSupplier getSnapshotIndexFromStateMachine,
+                          RaftProperties properties) {
+        this.name = memberId + "-" + JavaUtils.getClassSimpleName(getClass());
+        this.memberId = memberId;
+        long index = getSnapshotIndexFromStateMachine.getAsLong();
+        this.commitIndex = new RaftLogIndex("commitIndex", index);
+        this.snapshotIndex = new RaftLogIndex("snapshotIndex", index);
+        this.purgeIndex = new RaftLogIndex("purgeIndex", LEAST_VALID_LOG_INDEX - 1);
+        this.purgeGap = RaftServerConfigKeys.Log.purgeGap(properties);
+        this.maxBufferSize = RaftServerConfigKeys.Log.Appender.bufferByteLimit(properties).getSizeInt();
+        this.state = new OpenCloseState(getName());
+        this.getSnapshotIndexFromStateMachine = getSnapshotIndexFromStateMachine;
+        this.stateMachineDataReadTimeout = RaftServerConfigKeys.Log.StateMachineData.readTimeout(properties);
+        this.purgePreservation = RaftServerConfigKeys.Log.purgePreservationLogNum(properties);
+    }
     
     @Override
     public boolean updateCommitIndex(long majority, long currentTerm, boolean isLeader) {
